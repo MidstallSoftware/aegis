@@ -1,0 +1,13 @@
+v {xschem version=3.4.6 file_version=1.2}
+G {}
+V {}
+S {}
+E {}
+L 4 -60 -40 60 40 {}
+T {SerDes} -25 -10 0 0 0.3 0.3 {}
+B 5 -60 -30 -60 -30 {name=fabricIn dir=in}
+B 5 -60 0 -60 0 {name=fabricOut dir=out}
+B 5 60 -30 60 -30 {name=serialOut dir=out}
+B 5 60 -10 60 -10 {name=txReady dir=out}
+B 5 60 10 60 10 {name=serialIn dir=in}
+B 5 60 30 60 30 {name=rxValid dir=out}

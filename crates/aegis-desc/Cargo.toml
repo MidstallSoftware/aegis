@@ -1,0 +1,10 @@
+[package]
+name = "aegis-desc"
+version.workspace = true
+edition.workspace = true
+description = "Aegis FPGA device descriptor types generated from JSON Schema"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+typify = { workspace = true }

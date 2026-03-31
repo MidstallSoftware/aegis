@@ -1,0 +1,14 @@
+v {xschem version=3.4.6 file_version=1.2}
+G {}
+V {}
+S {}
+E {}
+L 4 -60 -50 60 50 {}
+T {PLL} -20 -10 0 0 0.3 0.3 {}
+B 5 -60 -40 -60 -40 {name=refClk dir=in}
+B 5 -60 0 -60 0 {name=reset dir=in}
+B 5 60 -40 60 -40 {name=clkOut[0] dir=out}
+B 5 60 -20 60 -20 {name=clkOut[1] dir=out}
+B 5 60 0 60 0 {name=clkOut[2] dir=out}
+B 5 60 20 60 20 {name=clkOut[3] dir=out}
+B 5 60 40 60 40 {name=locked dir=out}
