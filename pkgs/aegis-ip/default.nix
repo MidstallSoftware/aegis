@@ -3,7 +3,7 @@
   callPackage,
   stdenvNoCC,
   makeWrapper,
-  nextpnr,
+  nextpnr-aegis,
   aegis-ip-tools,
   aegis-pack,
 }:
@@ -104,7 +104,7 @@ lib.extendMkDerivation {
       nativeBuildInputs = (args.nativeBuildInputs or [ ]) ++ [
         aegis-ip-tools
         makeWrapper
-        nextpnr
+        nextpnr-aegis
       ];
 
       buildPhase = ''
@@ -122,9 +122,9 @@ lib.extendMkDerivation {
         makeWrapper ${aegis-ip-tools}/bin/aegis-sim $tools/bin/${deviceName}-sim \
           --add-flags "--descriptor $out/${deviceName}.json"
 
-        # nextpnr wrapper: pre-loads chipdb, runs custom packer, skips built-in packer
-        makeWrapper ${nextpnr}/bin/nextpnr-generic $tools/bin/nextpnr-aegis-${deviceName} \
-          --add-flags "--pre-pack $out/${deviceName}-chipdb.py --pre-pack $out/${deviceName}-packer.py --no-pack"
+        # nextpnr wrapper: aegis viaduct uarch with device dimensions
+        makeWrapper ${nextpnr-aegis}/bin/nextpnr-generic $tools/bin/nextpnr-aegis-${deviceName} \
+          --add-flags "--uarch aegis -o device=${toString width}x${toString height}t${toString tracks}"
 
         # bitstream packer wrapper: pre-loads the descriptor for this device
         makeWrapper ${aegis-pack}/bin/aegis-pack $tools/bin/${deviceName}-pack \
@@ -132,13 +132,10 @@ lib.extendMkDerivation {
 
         # Install EDA support files for targeting this device
         mkdir -p $tools/share/yosys/aegis
-        mkdir -p $tools/share/nextpnr/aegis
         cp $out/${deviceName}_cells.v $tools/share/yosys/aegis/
         cp $out/${deviceName}_techmap.v $tools/share/yosys/aegis/
         cp $out/${deviceName}_bram.rules $tools/share/yosys/aegis/ 2>/dev/null || true
         cp $out/${deviceName}-synth-aegis.tcl $tools/share/yosys/aegis/
-        cp $out/${deviceName}-chipdb.py $tools/share/nextpnr/aegis/
-        cp $out/${deviceName}-packer.py $tools/share/nextpnr/aegis/
 
         runHook postInstall
       '';

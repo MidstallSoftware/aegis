@@ -202,23 +202,6 @@ Future<void> main(List<String> arguments) async {
       File('$outputDir/${fpga.name}_bram.rules').writeAsStringSync(bramRules);
     }
 
-    final chipdbEmitter = ChipdbEmitter(
-      deviceName: fpga.name,
-      width: width,
-      height: height,
-      tracks: tracks,
-      serdesCount: serdesCount,
-      clockTileCount: clockTiles,
-      bramColumnInterval: bramInterval,
-      dspColumnInterval: dspInterval,
-    );
-    File(
-      '$outputDir/${fpga.name}-chipdb.py',
-    ).writeAsStringSync(chipdbEmitter.generate());
-    File(
-      '$outputDir/${fpga.name}-packer.py',
-    ).writeAsStringSync(chipdbEmitter.generatePacker());
-
     final openroadEmitter = OpenroadTclEmitter(
       moduleName: 'AegisFPGA',
       width: width,
@@ -240,7 +223,6 @@ Future<void> main(List<String> arguments) async {
     print('  $outputDir/${fpga.name}_cells.v');
     print('  $outputDir/${fpga.name}_techmap.v');
     print('  $outputDir/${fpga.name}-synth-aegis.tcl');
-    print('  $outputDir/${fpga.name}-chipdb.py');
     print('  $outputDir/${fpga.name}-openroad.tcl');
   } on FormatException catch (e) {
     print(e.message);

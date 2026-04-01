@@ -61,6 +61,7 @@
 
           treefmt.programs = {
             black.enable = true;
+            clang-format.enable = true;
             dart-format.enable = true;
             jsonfmt.enable = true;
             nixfmt.enable = true;
@@ -73,6 +74,17 @@
             flakever = flakeverConfig;
             aegis-ip-tools = pkgs.callPackage ./pkgs/aegis-ip-tools { };
             aegis-pack = pkgs.callPackage ./pkgs/aegis-pack { inherit craneLib; };
+            nextpnr-aegis = pkgs.nextpnr.overrideAttrs (old: {
+              pname = "nextpnr-aegis";
+              postPatch = (old.postPatch or "") + ''
+                # Add Aegis viaduct uarch
+                mkdir -p generic/viaduct/aegis
+                cp ${./nextpnr-aegis/aegis.cc} generic/viaduct/aegis/aegis.cc
+
+                # Register in CMakeLists.txt
+                sed -i '/viaduct\/example\/example.cc/a\    viaduct/aegis/aegis.cc' generic/CMakeLists.txt
+              '';
+            });
             gf180mcu-pdk = pkgs.callPackage ./pkgs/gf180mcu-pdk { };
             sky130-pdk = pkgs.callPackage ./pkgs/sky130-pdk { };
           };

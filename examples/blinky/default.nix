@@ -21,7 +21,11 @@ stdenvNoCC.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = ./blinky.v;
+    fileset = lib.fileset.unions [
+      ./blinky.v
+      ./blinky.pcf
+      ./place_io.py
+    ];
   };
 
   nativeBuildInputs = [
@@ -45,8 +49,9 @@ stdenvNoCC.mkDerivation {
     yosys -c synth.tcl > yosys.log 2>&1 || { cat yosys.log; exit 1; }
 
     echo "=== Place and route ==="
-    nextpnr-aegis-${deviceName} \
+    PCF_FILE=blinky.pcf nextpnr-aegis-${deviceName} \
       --json blinky_pnr.json \
+      --pre-place place_io.py \
       --write blinky_routed.json \
       > nextpnr.log 2>&1 || { cat nextpnr.log; echo "nextpnr finished (may have warnings)"; }
 
