@@ -22,6 +22,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-sim"
+version = "0.1.0"
+dependencies = [
+ "aegis-desc",
+ "clap",
+ "serde_json",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

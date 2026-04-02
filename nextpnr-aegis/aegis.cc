@@ -1,20 +1,22 @@
 /*
  *  Aegis FPGA viaduct micro-architecture for nextpnr-generic.
  *
- *  Defines the Aegis routing architecture natively in C++ for fast
- *  chipdb construction. Uses -o device=WxHtT to configure dimensions.
+ *  Models the actual Aegis routing architecture: directional routing
+ *  tracks (N/E/S/W) with configurable input and output muxes per tile.
+ *  Matches the Dart tile.dart implementation for bitstream compatibility.
  *
- *  Based on nextpnr's example viaduct uarch.
+ *  Uses -o device=WxHtT to configure dimensions.
  */
+
+#include <array>
+#include <fstream>
+#include <sstream>
 
 #include "log.h"
 #include "nextpnr.h"
 #include "util.h"
 #include "viaduct_api.h"
 #include "viaduct_helpers.h"
-
-// Use runtime ctx->id() instead of compile-time constids
-// to avoid IdString table conflicts
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -23,26 +25,37 @@ namespace {
 struct AegisImpl : ViaductAPI {
   ~AegisImpl() {};
 
-  // Device parameters
   int W = 4, H = 4;
   int T = 1;
-  int N = 1;
   int K = 4;
-  int Wl;
-  int Si = 4, Sq = 4, Sl = 8;
 
-  dict<std::string, std::string> device_args;
-
-  // Cached IdStrings — initialized in init()
+  // Cached IdStrings
   IdString id_LUT4, id_DFF, id_IOB, id_INBUF, id_OUTBUF;
   IdString id_CLK, id_D, id_Q, id_F, id_I, id_O, id_PAD, id_EN;
   IdString id_INIT, id_PIP, id_LOCAL;
+
+  dict<std::string, std::string> device_args;
+
+  // Per-tile wire storage
+  struct TileWires {
+    WireId clk;
+    std::vector<WireId> lut_in; // K inputs
+    WireId lut_out;             // F
+    WireId ff_d, ff_q;          // DFF wires
+    WireId carry_in, carry_out;
+    std::vector<WireId> track_n, track_e, track_s, track_w; // T tracks per dir
+    // Per-track output mux wires — one per track per direction
+    std::vector<WireId> out_n, out_e, out_s, out_w;
+    // IO wires (only for IO tiles)
+    std::vector<WireId> pad;
+    std::vector<WireId> io_in, io_out;
+  };
+  std::vector<std::vector<TileWires>> tile_wires;
 
   void init(Context *ctx) override {
     ViaductAPI::init(ctx);
     h.init(ctx);
 
-    // Initialize IdStrings
     id_LUT4 = ctx->id("LUT4");
     id_DFF = ctx->id("DFF");
     id_IOB = ctx->id("IOB");
@@ -58,27 +71,22 @@ struct AegisImpl : ViaductAPI {
     id_EN = ctx->id("EN");
     id_INIT = ctx->id("INIT");
     id_PIP = ctx->id("PIP");
-    id_LOCAL = ctx->id("LOCAL");
 
-    // Parse device parameters from vopt args
     if (device_args.count("device")) {
       std::string val = device_args.at("device");
       if (val.find('x') != std::string::npos) {
         sscanf(val.c_str(), "%dx%d", &W, &H);
-        if (val.find('t') != std::string::npos) {
+        if (val.find('t') != std::string::npos)
           sscanf(strstr(val.c_str(), "t") + 1, "%d", &T);
-        }
       }
     }
 
-    // Include IO ring
+    // Grid includes IO ring
     W += 2;
     H += 2;
-    Wl = N * (K + 1) + T * 4;
 
-    log_info(
-        "Aegis FPGA: %dx%d grid (%dx%d fabric), %d tracks, %d local wires\n", W,
-        H, W - 2, H - 2, T, Wl);
+    log_info("Aegis FPGA: %dx%d grid (%dx%d fabric), %d tracks\n", W, H, W - 2,
+             H - 2, T);
 
     init_wires();
     init_bels();
@@ -89,10 +97,8 @@ struct AegisImpl : ViaductAPI {
     IdString id_lut = ctx->id("$lut");
     IdString id_dff_p = ctx->id("$_DFF_P_");
     IdString id_Y = ctx->id("Y");
-    IdString id_C = ctx->id("C");
 
-    // Replace constants with $lut cells using proper parameter names
-    // $lut uses LUT (not INIT) and WIDTH parameters
+    // Replace constants with proper $lut cells
     const dict<IdString, Property> vcc_params = {
         {ctx->id("LUT"), Property(0xFFFF, 16)},
         {ctx->id("WIDTH"), Property(4, 32)}};
@@ -102,14 +108,63 @@ struct AegisImpl : ViaductAPI {
     h.replace_constants(CellTypePort(id_lut, id_Y), CellTypePort(id_lut, id_Y),
                         vcc_params, gnd_params);
 
-    // Constrain LUT+FF pairs for shared placement
+    // Constrain LUT+FF pairs
     int lutffs =
         h.constrain_cell_pairs(pool<CellTypePort>{{id_lut, id_Y}},
                                pool<CellTypePort>{{id_dff_p, id_D}}, 1);
     log_info("Constrained %d LUTFF pairs.\n", lutffs);
   }
 
-  void prePlace() override { assign_cell_info(); }
+  void prePlace() override {
+    assign_cell_info();
+
+    // Apply PCF constraints if provided via -o pcf=<file>
+    if (device_args.count("pcf")) {
+      std::string pcf_path = device_args.at("pcf");
+      std::ifstream pcf(pcf_path);
+      if (!pcf.is_open()) {
+        log_error("Cannot open PCF file: %s\n", pcf_path.c_str());
+      }
+      log_info("Reading PCF constraints from %s\n", pcf_path.c_str());
+      std::string line;
+      int count = 0;
+      while (std::getline(pcf, line)) {
+        // Strip comments and whitespace
+        auto comment_pos = line.find('#');
+        if (comment_pos != std::string::npos)
+          line = line.substr(0, comment_pos);
+        std::istringstream iss(line);
+        std::string cmd, signal, bel;
+        if (!(iss >> cmd >> signal >> bel))
+          continue;
+        if (cmd != "set_io")
+          continue;
+
+        // Find cell by name and constrain to BEL
+        IdString sig_id = ctx->id(signal);
+        bool found = false;
+        for (auto &cell : ctx->cells) {
+          if (cell.first == sig_id) {
+            BelId target = ctx->getBelByName(IdStringList::parse(ctx, bel));
+            if (target != BelId()) {
+              cell.second->attrs[ctx->id("BEL")] = bel;
+              log_info("  Constrained '%s' to BEL '%s'\n", signal.c_str(),
+                       bel.c_str());
+              count++;
+            } else {
+              log_warning("  BEL '%s' not found for signal '%s'\n", bel.c_str(),
+                          signal.c_str());
+            }
+            found = true;
+            break;
+          }
+        }
+        if (!found)
+          log_warning("  Signal '%s' not found in design\n", signal.c_str());
+      }
+      log_info("Applied %d PCF constraints.\n", count);
+    }
+  }
 
   bool isBelLocationValid(BelId bel, bool explain_invalid) const override {
     Loc l = ctx->getBelLocation(bel);
@@ -120,14 +175,6 @@ struct AegisImpl : ViaductAPI {
 
 private:
   ViaductHelpers h;
-
-  struct TileWires {
-    std::vector<WireId> clk, q, f, d, i;
-    std::vector<WireId> l;
-    std::vector<WireId> pad;
-  };
-
-  std::vector<std::vector<TileWires>> wires_by_tile;
 
   bool is_io(int x, int y) const {
     return (x == 0) || (x == (W - 1)) || (y == 0) || (y == (H - 1));
@@ -141,166 +188,273 @@ private:
 
   void init_wires() {
     log_info("Creating wires...\n");
-    wires_by_tile.resize(H);
+    tile_wires.resize(H);
     for (int y = 0; y < H; y++) {
-      auto &row = wires_by_tile.at(y);
-      row.resize(W);
+      tile_wires[y].resize(W);
       for (int x = 0; x < W; x++) {
-        auto &w = row.at(x);
+        auto &tw = tile_wires[y][x];
+
         if (!is_io(x, y)) {
           // Logic tile wires
-          for (int z = 0; z < N; z++) {
-            w.clk.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("CLK%d", z)),
-                                         id_CLK, x, y));
-            w.d.push_back(
-                ctx->addWire(h.xy_id(x, y, ctx->idf("D%d", z)), id_D, x, y));
-            w.q.push_back(
-                ctx->addWire(h.xy_id(x, y, ctx->idf("Q%d", z)), id_Q, x, y));
-            w.f.push_back(
-                ctx->addWire(h.xy_id(x, y, ctx->idf("F%d", z)), id_F, x, y));
-            for (int k = 0; k < K; k++)
-              w.i.push_back(ctx->addWire(
-                  h.xy_id(x, y, ctx->idf("L%dI%d", z, k)), id_I, x, y));
+          tw.clk = ctx->addWire(h.xy_id(x, y, ctx->id("CLK")), id_CLK, x, y);
+          tw.lut_out = ctx->addWire(h.xy_id(x, y, ctx->id("CLB_O")),
+                                    ctx->id("CLB_OUTPUT"), x, y);
+          tw.ff_d = ctx->addWire(h.xy_id(x, y, ctx->id("FF_D")), id_D, x, y);
+          tw.ff_q = ctx->addWire(h.xy_id(x, y, ctx->id("CLB_Q")), id_Q, x, y);
+          tw.carry_in = ctx->addWire(h.xy_id(x, y, ctx->id("CARRY_IN")),
+                                     ctx->id("CARRY"), x, y);
+          tw.carry_out = ctx->addWire(h.xy_id(x, y, ctx->id("CARRY_OUT")),
+                                      ctx->id("CARRY"), x, y);
+
+          // Per-track output mux wires — each track has its own independent mux
+          for (int t = 0; t < T; t++) {
+            tw.out_n.push_back(
+                ctx->addWire(h.xy_id(x, y, ctx->idf("OUT_N%d", t)),
+                             ctx->id("OUTPUT_MUX"), x, y));
+            tw.out_e.push_back(
+                ctx->addWire(h.xy_id(x, y, ctx->idf("OUT_E%d", t)),
+                             ctx->id("OUTPUT_MUX"), x, y));
+            tw.out_s.push_back(
+                ctx->addWire(h.xy_id(x, y, ctx->idf("OUT_S%d", t)),
+                             ctx->id("OUTPUT_MUX"), x, y));
+            tw.out_w.push_back(
+                ctx->addWire(h.xy_id(x, y, ctx->idf("OUT_W%d", t)),
+                             ctx->id("OUTPUT_MUX"), x, y));
+          }
+
+          for (int k = 0; k < K; k++)
+            tw.lut_in.push_back(
+                ctx->addWire(h.xy_id(x, y, ctx->idf("CLB_I%d", k)),
+                             ctx->id("CLB_INPUT"), x, y));
+
+          // Directional routing tracks
+          for (int t = 0; t < T; t++) {
+            tw.track_n.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("N%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+            tw.track_e.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("E%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+            tw.track_s.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("S%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+            tw.track_w.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("W%d", t)),
+                                              ctx->id("ROUTING"), x, y));
           }
         } else if (x != y) {
-          // IO tile wires — dedicated pad and IO wires
+          // IO tile wires
           for (int z = 0; z < 2; z++) {
-            w.pad.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("PAD%d", z)),
-                                         id_PAD, x, y));
-            // IO input/output/enable wires
-            w.i.push_back(
+            tw.pad.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("PAD%d", z)),
+                                          id_PAD, x, y));
+            tw.io_in.push_back(
                 ctx->addWire(h.xy_id(x, y, ctx->idf("IO_I%d", z)), id_I, x, y));
-            w.i.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("IO_EN%d", z)),
-                                       id_I, x, y));
-            w.q.push_back(
+            tw.io_out.push_back(
                 ctx->addWire(h.xy_id(x, y, ctx->idf("IO_O%d", z)), id_O, x, y));
           }
+          // IO tiles also have routing tracks for fabric connection
+          for (int t = 0; t < T; t++) {
+            tw.track_n.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("N%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+            tw.track_e.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("E%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+            tw.track_s.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("S%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+            tw.track_w.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("W%d", t)),
+                                              ctx->id("ROUTING"), x, y));
+          }
         }
-        // Local wires for routing
-        for (int l = 0; l < Wl; l++)
-          w.l.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("LOCAL%d", l)),
-                                     id_LOCAL, x, y));
       }
-    }
-  }
-
-  void add_io_bels(int x, int y) {
-    auto &w = wires_by_tile.at(y).at(x);
-    for (int z = 0; z < 2; z++) {
-      BelId b = ctx->addBel(h.xy_id(x, y, ctx->idf("IO%d", z)), id_IOB,
-                            Loc(x, y, z), false, false);
-      ctx->addBelInout(b, id_PAD, w.pad.at(z));
-      ctx->addBelInput(b, id_I, w.i.at(z * 2)); // $nextpnr_ibuf.I
-      ctx->addBelInput(b, ctx->id("A"),
-                       w.i.at(z * 2)); // $nextpnr_obuf.A (alias)
-      ctx->addBelInput(b, id_EN, w.i.at(z * 2 + 1));
-      ctx->addBelOutput(b, id_O, w.q.at(z));
-    }
-  }
-
-  void add_slice_bels(int x, int y) {
-    auto &w = wires_by_tile.at(y).at(x);
-    for (int z = 0; z < N; z++) {
-      BelId lut = ctx->addBel(h.xy_id(x, y, ctx->idf("SLICE%d_LUT", z)),
-                              id_LUT4, Loc(x, y, z * 2), false, false);
-      // Pin names match $lut cell: A[0]-A[3], Y
-      // Also add unindexed 'A' for constant LUTs created by replace_constants
-      for (int k = 0; k < K; k++)
-        ctx->addBelInput(lut, ctx->idf("A[%d]", k), w.i.at(z * K + k));
-      ctx->addBelInput(lut, ctx->id("A"), w.i.at(z * K));
-      ctx->addBelOutput(lut, ctx->id("Y"), w.f.at(z));
-
-      add_pip(Loc(x, y, 0), w.f.at(z), w.d.at(z));
-      add_pip(Loc(x, y, 0), w.i.at(z * K + (K - 1)), w.d.at(z));
-
-      // Pin names match $_DFF_P_ cell: C, D, Q
-      BelId dff = ctx->addBel(h.xy_id(x, y, ctx->idf("SLICE%d_FF", z)), id_DFF,
-                              Loc(x, y, z * 2 + 1), false, false);
-      ctx->addBelInput(dff, ctx->id("C"), w.clk.at(z));
-      ctx->addBelInput(dff, id_D, w.d.at(z));
-      ctx->addBelOutput(dff, id_Q, w.q.at(z));
     }
   }
 
   void init_bels() {
     log_info("Creating bels...\n");
-    for (int y = 0; y < H; y++)
+    for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         if (is_io(x, y)) {
           if (x == y)
             continue;
           add_io_bels(x, y);
         } else {
-          add_slice_bels(x, y);
+          add_logic_bels(x, y);
         }
       }
+    }
   }
 
-  void add_tile_pips(int x, int y) {
-    auto &w = wires_by_tile.at(y).at(x);
-    Loc loc(x, y, 0);
-
-    if (!is_io(x, y)) {
-      // Logic tile pips
-      auto create_input_pips = [&](WireId dst, int offset, int skip) {
-        for (int i = (offset % skip); i < Wl; i += skip)
-          add_pip(loc, w.l.at(i), dst, 0.05);
-      };
-      for (int z = 0; z < N; z++) {
-        create_input_pips(w.clk.at(z), 0, Si);
-        for (int k = 0; k < K; k++)
-          create_input_pips(w.i.at(z * K + k), k, Si);
-      }
-    } else if (x != y) {
-      // IO tile — connect IO wires to local routing
-      for (size_t z = 0; z < w.i.size(); z++) {
-        for (int l = (z % Si); l < Wl; l += Si)
-          add_pip(loc, w.l.at(l), w.i.at(z), 0.05);
-      }
-      for (size_t z = 0; z < w.q.size(); z++) {
-        for (int l = (z % Sq); l < Wl; l += Sq)
-          add_pip(loc, w.q.at(z), w.l.at(l), 0.05);
-      }
+  void add_io_bels(int x, int y) {
+    auto &tw = tile_wires[y][x];
+    for (int z = 0; z < 2; z++) {
+      BelId b = ctx->addBel(h.xy_id(x, y, ctx->idf("IO%d", z)), id_IOB,
+                            Loc(x, y, z), false, false);
+      ctx->addBelInout(b, id_PAD, tw.pad[z]);
+      ctx->addBelInput(b, id_I, tw.io_in[z]);
+      ctx->addBelInput(b, ctx->id("A"), tw.io_in[z]); // $nextpnr_obuf alias
+      ctx->addBelInput(b, id_EN,
+                       tw.io_in[std::min(z * 2 + 1, (int)tw.io_in.size() - 1)]);
+      ctx->addBelOutput(b, id_O, tw.io_out[z]);
     }
+  }
 
-    auto create_output_pips = [&](WireId dst, int offset, int skip) {
-      if (is_io(x, y))
-        return;
-      for (int z = (offset % skip); z < N; z += skip) {
-        add_pip(loc, w.f.at(z), dst, 0.05);
-        add_pip(loc, w.q.at(z), dst, 0.05);
-      }
-    };
-    auto create_neighbour_pips = [&](WireId dst, int nx, int ny, int offset,
-                                     int skip) {
-      if (nx < 0 || nx >= W || ny < 0 || ny >= H)
-        return;
-      auto &nw = wires_by_tile.at(ny).at(nx);
-      for (int i = (offset % skip); i < Wl; i += skip)
-        add_pip(loc, dst, nw.l.at(i), 0.1);
-    };
+  void add_logic_bels(int x, int y) {
+    auto &tw = tile_wires[y][x];
 
-    for (int i = 0; i < Wl; i++) {
-      WireId dst = w.l.at(i);
-      create_output_pips(dst, i % Sq, Sq);
-      create_neighbour_pips(dst, x - 1, y - 1, (i + 1) % Sl, Sl);
-      create_neighbour_pips(dst, x - 1, y, (i + 2) % Sl, Sl);
-      create_neighbour_pips(dst, x - 1, y + 1, (i + 3) % Sl, Sl);
-      create_neighbour_pips(dst, x, y - 1, (i + 4) % Sl, Sl);
-      create_neighbour_pips(dst, x, y + 1, (i + 5) % Sl, Sl);
-      create_neighbour_pips(dst, x + 1, y - 1, (i + 6) % Sl, Sl);
-      create_neighbour_pips(dst, x + 1, y, (i + 7) % Sl, Sl);
-      create_neighbour_pips(dst, x + 1, y + 1, (i + 8) % Sl, Sl);
-    }
+    // LUT4 BEL — pins match $lut cell ports: A[0]-A[3], Y
+    BelId lut = ctx->addBel(h.xy_id(x, y, ctx->id("SLICE0_LUT")), id_LUT4,
+                            Loc(x, y, 0), false, false);
+    for (int k = 0; k < K; k++)
+      ctx->addBelInput(lut, ctx->idf("A[%d]", k), tw.lut_in[k]);
+    ctx->addBelInput(lut, ctx->id("A"), tw.lut_in[0]); // constant LUT alias
+    ctx->addBelOutput(lut, ctx->id("Y"), tw.lut_out);
+
+    // LUT output -> FF D pip
+    add_pip(Loc(x, y, 0), tw.lut_out, tw.ff_d);
+
+    // DFF BEL — pins match $_DFF_P_ cell ports: C, D, Q
+    BelId dff = ctx->addBel(h.xy_id(x, y, ctx->id("SLICE0_FF")), id_DFF,
+                            Loc(x, y, 1), false, false);
+    ctx->addBelInput(dff, ctx->id("C"), tw.clk);
+    ctx->addBelInput(dff, id_D, tw.ff_d);
+    ctx->addBelOutput(dff, id_Q, tw.ff_q);
   }
 
   void init_pips() {
     log_info("Creating pips...\n");
-    for (int y = 0; y < H; y++)
-      for (int x = 0; x < W; x++)
-        add_tile_pips(x, y);
+    for (int y = 0; y < H; y++) {
+      for (int x = 0; x < W; x++) {
+        if (is_io(x, y)) {
+          if (x != y)
+            add_io_pips(x, y);
+        } else {
+          add_logic_pips(x, y);
+        }
+        add_inter_tile_pips(x, y);
+      }
+    }
   }
 
+  void add_logic_pips(int x, int y) {
+    auto &tw = tile_wires[y][x];
+    Loc loc(x, y, 0);
+
+    // CLB input muxes: each input reads from track 0 of each direction
+    // Hardware sel values: 0=N0, 1=E0, 2=S0, 3=W0, 4=CLB_OUT
+    for (int i = 0; i < K; i++) {
+      WireId dst = tw.lut_in[i];
+      for (int t = 0; t < T; t++) {
+        add_pip(loc, tw.track_n[t], dst, 0.05);
+        add_pip(loc, tw.track_e[t], dst, 0.05);
+        add_pip(loc, tw.track_s[t], dst, 0.05);
+        add_pip(loc, tw.track_w[t], dst, 0.05);
+      }
+      add_pip(loc, tw.lut_out, dst, 0.05); // feedback
+      add_pip(loc, tw.ff_q, dst, 0.05);    // FF output
+    }
+
+    // Clock: any track from any direction can drive clock
+    for (int t = 0; t < T; t++) {
+      add_pip(loc, tw.track_n[t], tw.clk, 0.05);
+      add_pip(loc, tw.track_e[t], tw.clk, 0.05);
+      add_pip(loc, tw.track_s[t], tw.clk, 0.05);
+      add_pip(loc, tw.track_w[t], tw.clk, 0.05);
+    }
+
+    // Per-track output routing. Each track in each direction has its own
+    // independent output mux, selecting from CLB_O, CLB_Q, or the same
+    // track index from any other direction (pass-through).
+    std::array<std::vector<WireId> *, 4> out_vecs = {&tw.out_n, &tw.out_e,
+                                                     &tw.out_s, &tw.out_w};
+    std::array<std::vector<WireId> *, 4> trk_vecs = {&tw.track_n, &tw.track_e,
+                                                     &tw.track_s, &tw.track_w};
+    for (int d = 0; d < 4; d++) {
+      for (int t = 0; t < T; t++) {
+        WireId out_wire = (*out_vecs[d])[t];
+        // CLB sources
+        add_pip(loc, tw.lut_out, out_wire, 0.05);
+        add_pip(loc, tw.ff_q, out_wire, 0.05);
+        // Pass-through from same track of other directions
+        for (int s = 0; s < 4; s++) {
+          if (s != d)
+            add_pip(loc, (*trk_vecs[s])[t], out_wire, 0.05);
+        }
+        // Output mux wire → track (1:1, not configurable)
+        add_pip(loc, out_wire, (*trk_vecs[d])[t], 0.01);
+      }
+    }
+  }
+
+  void add_io_pips(int x, int y) {
+    auto &tw = tile_wires[y][x];
+    Loc loc(x, y, 0);
+
+    // IO input -> routing tracks (pad input drives into fabric)
+    for (size_t z = 0; z < tw.io_out.size(); z++) {
+      for (int t = 0; t < T; t++) {
+        if (!tw.track_n.empty())
+          add_pip(loc, tw.io_out[z], tw.track_n[t], 0.05);
+        if (!tw.track_e.empty())
+          add_pip(loc, tw.io_out[z], tw.track_e[t], 0.05);
+        if (!tw.track_s.empty())
+          add_pip(loc, tw.io_out[z], tw.track_s[t], 0.05);
+        if (!tw.track_w.empty())
+          add_pip(loc, tw.io_out[z], tw.track_w[t], 0.05);
+      }
+    }
+
+    // Routing tracks -> IO output (fabric drives out to pad)
+    for (size_t z = 0; z < tw.io_in.size(); z++) {
+      for (int t = 0; t < T; t++) {
+        if (!tw.track_n.empty())
+          add_pip(loc, tw.track_n[t], tw.io_in[z], 0.05);
+        if (!tw.track_e.empty())
+          add_pip(loc, tw.track_e[t], tw.io_in[z], 0.05);
+        if (!tw.track_s.empty())
+          add_pip(loc, tw.track_s[t], tw.io_in[z], 0.05);
+        if (!tw.track_w.empty())
+          add_pip(loc, tw.track_w[t], tw.io_in[z], 0.05);
+      }
+    }
+
+    // No pass-through pips within IO tiles. The sim models IO tiles
+    // as simple pass-through (one value per direction), so per-track
+    // direction changes are not supported. Routing through the IO ring
+    // must use fabric tiles for direction changes.
+  }
+
+  void add_inter_tile_pips(int x, int y) {
+    auto &tw = tile_wires[y][x];
+    Loc loc(x, y, 0);
+
+    if (tw.track_n.empty())
+      return;
+
+    // IO ring tiles only get span-1 connections (no multi-span routing
+    // through the IO ring — the sim models IO tiles as simple pass-through)
+    int max_span = is_io(x, y) ? 1 : 4;
+    int spans[] = {1, 2, 4};
+    for (int span : spans) {
+      if (span > max_span)
+        break;
+      delay_t delay = 0.1 * span;
+      for (int t = 0; t < T; t++) {
+        // North
+        if (y - span >= 0 && !tile_wires[y - span][x].track_s.empty())
+          add_pip(loc, tw.track_n[t], tile_wires[y - span][x].track_s[t],
+                  delay);
+        // South
+        if (y + span < H && !tile_wires[y + span][x].track_n.empty())
+          add_pip(loc, tw.track_s[t], tile_wires[y + span][x].track_n[t],
+                  delay);
+        // East
+        if (x + span < W && !tile_wires[y][x + span].track_w.empty())
+          add_pip(loc, tw.track_e[t], tile_wires[y][x + span].track_w[t],
+                  delay);
+        // West
+        if (x - span >= 0 && !tile_wires[y][x - span].track_e.empty())
+          add_pip(loc, tw.track_w[t], tile_wires[y][x - span].track_e[t],
+                  delay);
+      }
+    }
+  }
+
+  // Validity checking
   struct AegisCellInfo {
     const NetInfo *lut_f = nullptr, *ff_d = nullptr;
     bool lut_i3_used = false;

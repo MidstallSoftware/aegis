@@ -29,7 +29,7 @@ void main() {
       );
       await fabric.build();
 
-      expect(fabric.totalConfigBits, 2 * 2 * Tile.CONFIG_WIDTH);
+      expect(fabric.totalConfigBits, 2 * 2 * tileConfigWidth(4));
     });
 
     test('bramColumns computed correctly', () {
@@ -55,7 +55,7 @@ void main() {
       expect(withBram, lessThan(noBram));
       expect(
         noBram - withBram,
-        4 * (Tile.CONFIG_WIDTH - BramTile.CONFIG_WIDTH),
+        4 * (tileConfigWidth(1) - BramTile.CONFIG_WIDTH),
       );
     });
 

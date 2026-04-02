@@ -74,17 +74,8 @@
             flakever = flakeverConfig;
             aegis-ip-tools = pkgs.callPackage ./pkgs/aegis-ip-tools { };
             aegis-pack = pkgs.callPackage ./pkgs/aegis-pack { inherit craneLib; };
-            nextpnr-aegis = pkgs.nextpnr.overrideAttrs (old: {
-              pname = "nextpnr-aegis";
-              postPatch = (old.postPatch or "") + ''
-                # Add Aegis viaduct uarch
-                mkdir -p generic/viaduct/aegis
-                cp ${./nextpnr-aegis/aegis.cc} generic/viaduct/aegis/aegis.cc
-
-                # Register in CMakeLists.txt
-                sed -i '/viaduct\/example\/example.cc/a\    viaduct/aegis/aegis.cc' generic/CMakeLists.txt
-              '';
-            });
+            aegis-sim = pkgs.callPackage ./pkgs/aegis-sim { inherit craneLib; };
+            nextpnr-aegis = pkgs.callPackage ./pkgs/nextpnr-aegis { };
             gf180mcu-pdk = pkgs.callPackage ./pkgs/gf180mcu-pdk { };
             sky130-pdk = pkgs.callPackage ./pkgs/sky130-pdk { };
           };
@@ -108,15 +99,34 @@
             };
           };
 
-          checks = {
-            terra-1-blinky = pkgs.callPackage ./examples/blinky {
-              aegis-ip = self.packages.${system}.terra-1;
+          checks =
+            let
+              terra-1 = self.packages.${system}.terra-1;
+            in
+            {
+              terra-1-blinky = pkgs.callPackage ./examples/blinky {
+                aegis-ip = terra-1;
+              };
+              terra-1-blinky-sim = pkgs.callPackage ./tests/blinky-sim {
+                aegis-ip = terra-1;
+              };
+              terra-1-counter = pkgs.callPackage ./tests/counter-verify {
+                aegis-ip = terra-1;
+              };
+              terra-1-shift-register = pkgs.callPackage ./tests/shift-register {
+                aegis-ip = terra-1;
+              };
+              terra-1-logic-gates = pkgs.callPackage ./tests/logic-gates {
+                aegis-ip = terra-1;
+              };
             };
-          };
 
           devShells = {
             default = pkgs.aegis-ip-tools.shell;
             ip-tools = pkgs.aegis-ip-tools.shell;
+            terra-1 = self.packages.${system}.terra-1.shell;
+            terra-1-tapeout = self.packages.${system}.terra-1-tapeout.shell;
+            terra-1-blinky = self.checks.${system}.terra-1-blinky.shell;
           };
         };
     };

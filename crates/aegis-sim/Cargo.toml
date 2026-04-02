@@ -1,11 +1,10 @@
 [package]
-name = "aegis-pack"
+name = "aegis-sim"
 version.workspace = true
 edition.workspace = true
-description = "Bitstream packer for Aegis FPGA devices"
+description = "Fast cycle-accurate simulator for Aegis FPGA"
 
 [dependencies]
 aegis-desc = { path = "../aegis-desc" }
 clap = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }

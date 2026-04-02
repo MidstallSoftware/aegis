@@ -2,10 +2,14 @@
   lib,
   callPackage,
   stdenvNoCC,
+  mkShell,
   makeWrapper,
+  yosys,
+  surfer,
   nextpnr-aegis,
   aegis-ip-tools,
   aegis-pack,
+  aegis-sim,
 }:
 
 lib.extendMkDerivation {
@@ -119,7 +123,8 @@ lib.extendMkDerivation {
         # Create device-specific wrapped tools
         mkdir -p $tools/bin
 
-        makeWrapper ${aegis-ip-tools}/bin/aegis-sim $tools/bin/${deviceName}-sim \
+        # Rust simulator: fast cycle-accurate simulation
+        makeWrapper ${aegis-sim}/bin/aegis-sim $tools/bin/${deviceName}-sim \
           --add-flags "--descriptor $out/${deviceName}.json"
 
         # nextpnr wrapper: aegis viaduct uarch with device dimensions
@@ -155,6 +160,17 @@ lib.extendMkDerivation {
           configAddressWidth
           ;
         mkTapeout = callPackage ../aegis-tapeout { aegis-ip = finalAttrs.finalPackage; };
+        shell = mkShell {
+          name = "aegis-${deviceName}-shell";
+          packages = [
+            aegis-ip-tools
+            aegis-pack
+            aegis-sim
+            nextpnr-aegis
+            yosys
+            surfer
+          ];
+        };
       }
       // (args.passthru or { });
 

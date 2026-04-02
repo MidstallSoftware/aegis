@@ -7,3 +7,5 @@ result-*
 
 # Rust/Cargo build artifacts
 /target/
+
+*.vcd

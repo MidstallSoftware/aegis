@@ -77,78 +77,71 @@ void main() {
   });
 
   group('TileConfig', () {
-    test('default', () {
-      const cfg = TileConfig();
-      expect(cfg.sel0, InputSource.constZero);
-      expect(cfg.enNorth, false);
-      expect(cfg.selNorth, InputSource.north);
+    test('default for 1 track', () {
+      final cfg = TileConfig.defaultFor(1);
+      expect(cfg.inputSel, [0, 0, 0, 0]);
+      expect(cfg.outputs[0][0].enable, false);
     });
 
-    test('encode/decode round-trip with all fields set', () {
-      const cfg = TileConfig(
-        clb: ClbConfig(
+    test('encode/decode round-trip with T=1', () {
+      final cfg = TileConfig(
+        clb: const ClbConfig(
           lut: Lut4Config(truthTable: 0x1234),
           ffEnable: true,
           carryMode: false,
         ),
-        sel0: InputSource.north,
-        sel1: InputSource.east,
-        sel2: InputSource.south,
-        sel3: InputSource.west,
-        enNorth: true,
-        enEast: false,
-        enSouth: true,
-        enWest: true,
-        selNorth: InputSource.clbOut,
-        selEast: InputSource.constZero,
-        selSouth: InputSource.constOne,
-        selWest: InputSource.north,
+        tracks: 1,
+        inputSel: [0, 1, 2, 3], // N0, E0, S0, W0
+        outputs: [
+          [const TrackOutputConfig(enable: true, select: 4)], // N0: CLB
+          [const TrackOutputConfig(enable: false, select: 0)], // E0: off
+          [
+            const TrackOutputConfig(enable: true, select: 6),
+          ], // S0: const1 (invalid but tests encoding)
+          [const TrackOutputConfig(enable: true, select: 0)], // W0: north
+        ],
       );
       final bits = cfg.encode();
-      final decoded = TileConfig.decode(bits);
+      final decoded = TileConfig.decode(bits, tracks: 1);
       expect(decoded.clb.lut.truthTable, 0x1234);
       expect(decoded.clb.ffEnable, true);
       expect(decoded.clb.carryMode, false);
-      expect(decoded.sel0, InputSource.north);
-      expect(decoded.sel1, InputSource.east);
-      expect(decoded.sel2, InputSource.south);
-      expect(decoded.sel3, InputSource.west);
-      expect(decoded.enNorth, true);
-      expect(decoded.enEast, false);
-      expect(decoded.enSouth, true);
-      expect(decoded.enWest, true);
-      expect(decoded.selNorth, InputSource.clbOut);
-      expect(decoded.selEast, InputSource.constZero);
-      expect(decoded.selSouth, InputSource.constOne);
-      expect(decoded.selWest, InputSource.north);
+      expect(decoded.inputSel, [0, 1, 2, 3]);
+      expect(decoded.outputs[0][0].enable, true);
+      expect(decoded.outputs[0][0].select, 4);
+      expect(decoded.outputs[1][0].enable, false);
+      expect(decoded.outputs[2][0].enable, true);
+      expect(decoded.outputs[3][0].enable, true);
+      expect(decoded.outputs[3][0].select, 0);
     });
 
-    test('bits fit in 46 bits', () {
-      const cfg = TileConfig(
-        clb: ClbConfig(
+    test('T=1 fits in 46 bits', () {
+      expect(tileConfigWidth(1), 46);
+      final cfg = TileConfig(
+        clb: const ClbConfig(
           lut: Lut4Config(truthTable: 0xFFFF),
           ffEnable: true,
           carryMode: true,
         ),
-        sel0: InputSource.constOne,
-        sel1: InputSource.constOne,
-        sel2: InputSource.constOne,
-        sel3: InputSource.constOne,
-        enNorth: true,
-        enEast: true,
-        enSouth: true,
-        enWest: true,
-        selNorth: InputSource.constOne,
-        selEast: InputSource.constOne,
-        selSouth: InputSource.constOne,
-        selWest: InputSource.constOne,
+        tracks: 1,
+        inputSel: [6, 6, 6, 6], // max value for T=1
+        outputs: [
+          [const TrackOutputConfig(enable: true, select: 7)],
+          [const TrackOutputConfig(enable: true, select: 7)],
+          [const TrackOutputConfig(enable: true, select: 7)],
+          [const TrackOutputConfig(enable: true, select: 7)],
+        ],
       );
       final bits = cfg.encode();
-      expect(bits < (BigInt.one << TileConfig.width), true);
+      expect(bits < (BigInt.one << 46), true);
+    });
+
+    test('T=4 width is 102', () {
+      expect(tileConfigWidth(4), 102);
     });
 
     test('toString', () {
-      expect(const TileConfig().toString(), contains('TileConfig'));
+      expect(TileConfig.defaultFor(1).toString(), contains('TileConfig'));
     });
   });
 

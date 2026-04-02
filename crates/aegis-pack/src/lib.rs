@@ -40,40 +40,72 @@ pub struct PnrModule {
     pub netnames: HashMap<String, PnrNet>,
 }
 
-/// Tile config bit layout constants.
+/// Tile config bit layout (parametric, matches Dart tile_config.dart).
 ///
-/// These match the Dart tile implementation:
-///   [17:0]  CLB config (16 LUT + 1 FF enable + 1 carry mode)
-///   [20:18] sel0, [23:21] sel1, [26:24] sel2, [29:27] sel3
-///   [30] enNorth, [31] enEast, [32] enSouth, [33] enWest
-///   [36:34] selNorth, [39:37] selEast, [42:40] selSouth, [45:43] selWest
+/// Layout for T tracks:
+///   [17:0]              CLB config (16 LUT + 1 FF enable + 1 carry mode)
+///   [18..18+4*ISW-1]    input mux sel0..sel3 (ISW = input_sel_width(T))
+///   [18+4*ISW..]        per-track output: 4 dirs × T tracks × (1 en + 3 sel)
+///
+/// For T=1: 46 bits (backward compatible)
+/// For T=4: 102 bits
 mod tile_bits {
     pub const LUT_INIT: usize = 0;
     pub const LUT_INIT_WIDTH: usize = 16;
     pub const FF_ENABLE: usize = 16;
     pub const CARRY_MODE: usize = 17;
 
-    pub const SEL_BASE: usize = 18;
-    pub const SEL_WIDTH: usize = 3;
+    pub const INPUT_SEL_BASE: usize = 18;
 
-    pub const EN_NORTH: usize = 30;
-    pub const EN_EAST: usize = 31;
-    pub const EN_SOUTH: usize = 32;
-    pub const EN_WEST: usize = 33;
+    /// Width of input select field for T tracks.
+    pub fn input_sel_width(tracks: usize) -> usize {
+        let n = 4 * tracks + 3;
+        (usize::BITS - (n - 1).leading_zeros()) as usize
+    }
 
-    pub const SEL_NORTH: usize = 34;
-    pub const SEL_EAST: usize = 37;
-    pub const SEL_SOUTH: usize = 40;
-    pub const SEL_WEST: usize = 43;
+    /// Bit offset of input sel[idx] for T tracks.
+    pub fn input_sel_offset(idx: usize, tracks: usize) -> usize {
+        INPUT_SEL_BASE + idx * input_sel_width(tracks)
+    }
 
-    /// Input mux select values matching the Dart tile implementation.
-    pub const MUX_NORTH: u64 = 0;
-    pub const MUX_EAST: u64 = 1;
-    pub const MUX_SOUTH: u64 = 2;
-    pub const MUX_WEST: u64 = 3;
-    pub const MUX_CLB_OUT: u64 = 4;
-    pub const MUX_CONST0: u64 = 5;
-    pub const MUX_CONST1: u64 = 6;
+    /// Base offset of the per-track output section.
+    pub fn output_base(tracks: usize) -> usize {
+        INPUT_SEL_BASE + 4 * input_sel_width(tracks)
+    }
+
+    /// Enable bit offset for output (dir, track).
+    pub fn output_en(dir: usize, track: usize, tracks: usize) -> usize {
+        output_base(tracks) + (dir * tracks + track) * 4
+    }
+
+    /// Select field offset for output (dir, track). 3 bits wide.
+    pub fn output_sel(dir: usize, track: usize, tracks: usize) -> usize {
+        output_base(tracks) + (dir * tracks + track) * 4 + 1
+    }
+
+    pub const OUTPUT_SEL_WIDTH: usize = 3;
+
+    /// Total tile config width for T tracks.
+    pub fn tile_config_width(tracks: usize) -> usize {
+        18 + 4 * input_sel_width(tracks) + 4 * tracks * 4
+    }
+
+    /// Input mux select value for direction + track.
+    pub fn mux_dir_track(dir: usize, track: usize, tracks: usize) -> u64 {
+        (dir * tracks + track) as u64
+    }
+
+    /// Input mux select value for CLB output.
+    pub fn mux_clb_out(tracks: usize) -> u64 {
+        (4 * tracks) as u64
+    }
+
+    /// Output mux select values (same as direction indices + CLB).
+    pub const OUT_MUX_NORTH: u64 = 0;
+    pub const OUT_MUX_EAST: u64 = 1;
+    pub const OUT_MUX_SOUTH: u64 = 2;
+    pub const OUT_MUX_WEST: u64 = 3;
+    pub const OUT_MUX_CLB: u64 = 4;
 }
 
 /// Pack a nextpnr-placed design into a bitstream.
@@ -115,12 +147,12 @@ pub fn pack(desc: &AegisFpgaDeviceDescriptor, pnr: &PnrOutput) -> Vec<u8> {
     for (_name, cell) in &module.cells {
         let loc = cell_location(cell);
         match cell.cell_type.as_str() {
-            "AEGIS_LUT4" => {
+            "AEGIS_LUT4" | "$lut" => {
                 if let Some((x, y)) = loc {
                     pack_lut4(&mut bits, cell, x, y, &tile_offsets, fabric_base);
                 }
             }
-            "AEGIS_DFF" => {
+            "AEGIS_DFF" | "$_DFF_P_" => {
                 if let Some((x, y)) = loc {
                     pack_dff(&mut bits, x, y, &tile_offsets, fabric_base);
                 }
@@ -140,7 +172,8 @@ pub fn pack(desc: &AegisFpgaDeviceDescriptor, pnr: &PnrOutput) -> Vec<u8> {
     }
 
     // Pack routing from pip names
-    pack_routing(&mut bits, pnr, &tile_offsets, fabric_base);
+    let tracks = u64::from(desc.fabric.tracks) as usize;
+    pack_routing(&mut bits, pnr, &tile_offsets, fabric_base, tracks);
 
     bits
 }
@@ -152,8 +185,11 @@ fn cell_location(cell: &PnrCell) -> Option<(i64, i64)> {
     let bel = cell
         .attributes
         .get("place")
+        .or_else(|| cell.attributes.get("NEXTPNR_BEL"))
         .or_else(|| cell.attributes.get("nextpnr_bel"))?;
-    parse_xy(bel)
+    // Convert viaduct grid coords to descriptor tile coords (-1 for IO ring)
+    let (x, y) = parse_xy(bel)?;
+    Some((x - 1, y - 1))
 }
 
 /// Parse "X{x}/Y{y}/..." into (x, y).
@@ -172,8 +208,17 @@ fn set_bit(bits: &mut [u8], offset: usize) {
     bits[offset / 8] |= 1 << (offset % 8);
 }
 
+/// Clear bits in the bitstream at a given bit offset and width.
+fn clear_bits(bits: &mut [u8], offset: usize, width: usize) {
+    for i in 0..width {
+        bits[(offset + i) / 8] &= !(1 << ((offset + i) % 8));
+    }
+}
+
 /// Write a value into the bitstream at a given bit offset and width.
+/// Clears the field first, then sets the new value.
 fn write_bits(bits: &mut [u8], offset: usize, value: u64, width: usize) {
+    clear_bits(bits, offset, width);
     for i in 0..width {
         if value & (1 << i) != 0 {
             set_bit(bits, offset + i);
@@ -195,7 +240,8 @@ fn pack_lut4(
 
     let init = cell
         .parameters
-        .get("INIT")
+        .get("LUT")
+        .or_else(|| cell.parameters.get("INIT"))
         .and_then(|v| parse_param(v, 16))
         .unwrap_or(0);
 
@@ -249,155 +295,275 @@ fn pack_bram(
 
 /// Pack routing configuration by parsing pip names from routed nets.
 ///
-/// Pip naming convention from the chipdb emitter:
-///   CLB input mux:  `X{x}/Y{y}/MUX_I{i}_{src}` where src = N/E/S/W/FB/Q
-///   Output route:   `X{x}/Y{y}/RT_{dir}{t}_{src}` where src = CLB/Q
-///   Inter-tile:     `X{x}/Y{y}/{dir}{t}_{movement}` (no config bits needed)
-///   Clock:          `X{x}/Y{y}/GLB_CLK` (no config bits needed)
+/// The ROUTING attribute contains semicolon-separated entries:
+///   wire_name;pip_name;strength
+/// where pip_name is "dst_wire/src_wire".
+///
+/// Pip names use directional wire names:
+///   CLB_I{n} = CLB input n
+///   CLB_O    = CLB output (LUT out)
+///   CLB_Q    = FF output
+///   N{t}     = north track t
+///   E{t}     = east track t
+///   S{t}     = south track t
+///   W{t}     = west track t
+///   CLK      = clock wire
 fn pack_routing(
     bits: &mut [u8],
     pnr: &PnrOutput,
     tile_offsets: &HashMap<(i64, i64), (usize, usize)>,
     fabric_base: usize,
+    tracks: usize,
 ) {
     let module = match pnr.modules.values().next() {
         Some(m) => m,
         None => return,
     };
 
-    // Collect all pip names from the routed nets.
-    // nextpnr stores routing in the "route" attribute of netnames,
-    // or we can scan cell attributes for routed pips.
-    // The exact format depends on the nextpnr version, so we also
-    // accept a flat list approach where pip names appear in net attributes.
-    let mut pips: Vec<String> = Vec::new();
-
     for (_name, net) in &module.netnames {
-        if let Some(route) = net.attributes.get("route") {
-            collect_pips_from_route(route, &mut pips);
-        }
-    }
+        let route = match net.attributes.get("ROUTING") {
+            Some(Value::String(s)) => s.clone(),
+            _ => continue,
+        };
 
-    // Process each pip
-    for pip in &pips {
-        pack_pip(bits, pip, tile_offsets, fabric_base);
+        // Parse semicolon-separated entries: wire;pip;strength
+        let parts: Vec<&str> = route.split(';').collect();
+        let mut i = 0;
+        while i + 2 < parts.len() {
+            let _wire = parts[i];
+            let pip = parts[i + 1];
+            let _strength = parts[i + 2];
+            i += 3;
+
+            pack_routing_pip(bits, pip, tile_offsets, fabric_base, tracks);
+        }
     }
 }
 
-/// Extract pip names from a nextpnr route attribute.
+/// Parse and pack a single routing pip.
 ///
-/// The route attribute can be a string of space-separated pip names,
-/// or a more complex structure. We extract anything that looks like
-/// a pip name (X{n}/Y{n}/...).
-fn collect_pips_from_route(route: &Value, pips: &mut Vec<String>) {
-    match route {
-        Value::String(s) => {
-            for part in s.split_whitespace() {
-                if part.starts_with('X') && part.contains('/') {
-                    pips.push(part.to_string());
-                }
-            }
-        }
-        Value::Array(arr) => {
-            for item in arr {
-                collect_pips_from_route(item, pips);
-            }
-        }
-        Value::Object(obj) => {
-            for (_key, val) in obj {
-                collect_pips_from_route(val, pips);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Pack a single pip's configuration into the bitstream.
-fn pack_pip(
+/// Pip format: "X{dx}/Y{dy}/dst_wire/X{sx}/Y{sy}/src_wire"
+///
+/// For multi-span pips (where source and destination are more than 1 tile
+/// apart), this also fills in pass-through routing on intermediate tiles.
+fn pack_routing_pip(
     bits: &mut [u8],
     pip: &str,
     tile_offsets: &HashMap<(i64, i64), (usize, usize)>,
     fabric_base: usize,
+    tracks: usize,
 ) {
-    let Some((x, y)) = parse_xy(pip) else {
+    let parts: Vec<&str> = pip.split('/').collect();
+    if parts.len() < 4 {
         return;
-    };
-    let Some(&(tile_offset, _)) = tile_offsets.get(&(x, y)) else {
-        return;
-    };
+    }
 
-    let base = fabric_base + tile_offset;
-
-    // Extract the pip type from the name (after X{x}/Y{y}/)
-    let pip_suffix = match pip.splitn(3, '/').nth(2) {
-        Some(s) => s,
+    let dst_gx: i64 = match parts[0]
+        .strip_prefix('X')
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        Some(v) => v,
         None => return,
     };
+    let dst_gy: i64 = match parts[1]
+        .strip_prefix('Y')
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        Some(v) => v,
+        None => return,
+    };
+    let dst_x = dst_gx - 1;
+    let dst_y = dst_gy - 1;
+    let dst_wire = parts[2];
 
-    // CLB input mux: MUX_I{i}_{source}
-    if let Some(rest) = pip_suffix.strip_prefix("MUX_I") {
-        if let Some((idx_str, source)) = rest.split_once('_') {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                if idx < 4 {
-                    let sel_offset = base + tile_bits::SEL_BASE + idx * tile_bits::SEL_WIDTH;
-                    let sel_val = match source {
-                        "N" => tile_bits::MUX_NORTH,
-                        "E" => tile_bits::MUX_EAST,
-                        "S" => tile_bits::MUX_SOUTH,
-                        "W" => tile_bits::MUX_WEST,
-                        "FB" | "Q" => tile_bits::MUX_CLB_OUT,
-                        _ => return,
-                    };
-                    write_bits(bits, sel_offset, sel_val, tile_bits::SEL_WIDTH);
+    let (src_gx, src_gy, src_wire) = if parts.len() >= 6 {
+        let sx: i64 = match parts[3]
+            .strip_prefix('X')
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            Some(v) => v,
+            None => return,
+        };
+        let sy: i64 = match parts[4]
+            .strip_prefix('Y')
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            Some(v) => v,
+            None => return,
+        };
+        (sx, sy, parts[5])
+    } else {
+        (dst_gx, dst_gy, parts[3])
+    };
+
+    // Fill intermediate tiles for multi-span pips
+    let dx = dst_gx - src_gx;
+    let dy = dst_gy - src_gy;
+    if dx.abs() > 1 || dy.abs() > 1 {
+        let steps = dx.abs().max(dy.abs());
+        let step_x = if dx != 0 { dx.signum() } else { 0 };
+        let step_y = if dy != 0 { dy.signum() } else { 0 };
+
+        // Determine flow direction and extract track from source wire
+        let (from_dir, to_dir, track) = if dy < 0 {
+            (
+                tile_bits::OUT_MUX_SOUTH,
+                0usize, // north
+                parse_track(src_wire).unwrap_or(0),
+            )
+        } else if dy > 0 {
+            (
+                tile_bits::OUT_MUX_NORTH,
+                2usize, // south
+                parse_track(src_wire).unwrap_or(0),
+            )
+        } else if dx > 0 {
+            (
+                tile_bits::OUT_MUX_WEST,
+                1usize, // east
+                parse_track(src_wire).unwrap_or(0),
+            )
+        } else {
+            (
+                tile_bits::OUT_MUX_EAST,
+                3usize, // west
+                parse_track(src_wire).unwrap_or(0),
+            )
+        };
+
+        let min_width = tile_bits::tile_config_width(tracks);
+        for step in 1..steps {
+            let ix = (src_gx + step_x * step) - 1;
+            let iy = (src_gy + step_y * step) - 1;
+            if let Some(&(tile_offset, config_width)) = tile_offsets.get(&(ix, iy)) {
+                if config_width >= min_width {
+                    let base = fabric_base + tile_offset;
+                    set_bit(bits, base + tile_bits::output_en(to_dir, track, tracks));
+                    write_bits(
+                        bits,
+                        base + tile_bits::output_sel(to_dir, track, tracks),
+                        from_dir,
+                        tile_bits::OUTPUT_SEL_WIDTH,
+                    );
+                }
+            }
+        }
+    }
+
+    // Inter-tile pips are hardwired — no config bits needed.
+    if src_gx != dst_gx || src_gy != dst_gy {
+        return;
+    }
+
+    let Some(&(tile_offset, config_width)) = tile_offsets.get(&(dst_x, dst_y)) else {
+        return;
+    };
+    let min_width = tile_bits::tile_config_width(tracks);
+    if config_width < min_width {
+        return;
+    }
+
+    let base = fabric_base + tile_offset;
+    let isw = tile_bits::input_sel_width(tracks);
+
+    // CLB input mux: dst is CLB_I{n}, src is a track or CLB wire
+    if let Some(rest) = dst_wire.strip_prefix("CLB_I") {
+        if let Ok(idx) = rest.parse::<usize>() {
+            if idx < 4 {
+                if let Some(sel_val) = wire_to_input_sel(src_wire, tracks) {
+                    let sel_offset = base + tile_bits::input_sel_offset(idx, tracks);
+                    write_bits(bits, sel_offset, sel_val, isw);
                 }
             }
         }
         return;
     }
 
-    // Output route mux: RT_{dir}{track}_{source}
-    if let Some(rest) = pip_suffix.strip_prefix("RT_") {
-        // Parse direction (first char) and source (after last _)
-        let dir = &rest[..1];
-        if let Some((_track_and_more, source)) = rest[1..].rsplit_once('_') {
-            // Enable the output direction
-            let en_bit = match dir {
-                "N" => tile_bits::EN_NORTH,
-                "E" => tile_bits::EN_EAST,
-                "S" => tile_bits::EN_SOUTH,
-                "W" => tile_bits::EN_WEST,
-                _ => return,
-            };
-            set_bit(bits, base + en_bit);
-
-            // Set the route source select
-            let sel_offset = match dir {
-                "N" => tile_bits::SEL_NORTH,
-                "E" => tile_bits::SEL_EAST,
-                "S" => tile_bits::SEL_SOUTH,
-                "W" => tile_bits::SEL_WEST,
-                _ => return,
-            };
-            let sel_val = match source {
-                "CLB" | "Q" => tile_bits::MUX_CLB_OUT,
-                _ => return,
-            };
-            write_bits(bits, base + sel_offset, sel_val, tile_bits::SEL_WIDTH);
-        }
+    // Per-track output mux: dst is OUT_N{t}/OUT_E{t}/OUT_S{t}/OUT_W{t}
+    if let Some((dir, track)) = parse_output_mux_wire(dst_wire) {
+        let sel_val = if src_wire == "CLB_O" || src_wire == "CLB_Q" {
+            tile_bits::OUT_MUX_CLB
+        } else if let Some((src_dir, _)) = parse_track_wire(src_wire) {
+            src_dir as u64
+        } else {
+            return;
+        };
+        set_bit(bits, base + tile_bits::output_en(dir, track, tracks));
+        write_bits(
+            bits,
+            base + tile_bits::output_sel(dir, track, tracks),
+            sel_val,
+            tile_bits::OUTPUT_SEL_WIDTH,
+        );
         return;
     }
 
-    // Inter-tile pips and clock pips don't need config bits
+    // Fan-out pip: dst is N{t}/E{t}/S{t}/W{t} — hardwired, no config.
+    // CLK pip: dst is CLK — no config bits in current architecture.
+    // FF_D pip: dst is FF_D — internal, no config.
+}
+
+/// Parse a track wire name like "N0", "E3" into (direction, track).
+fn parse_track_wire(wire: &str) -> Option<(usize, usize)> {
+    let (prefix, rest) = wire.split_at(1);
+    if !rest.chars().all(|c| c.is_ascii_digit()) || rest.is_empty() {
+        return None;
+    }
+    let track: usize = rest.parse().ok()?;
+    let dir = match prefix {
+        "N" => 0,
+        "E" => 1,
+        "S" => 2,
+        "W" => 3,
+        _ => return None,
+    };
+    Some((dir, track))
+}
+
+/// Extract the track number from a wire name (e.g., "S1" -> 1, "N0" -> 0).
+fn parse_track(wire: &str) -> Option<usize> {
+    parse_track_wire(wire).map(|(_, t)| t)
+}
+
+/// Parse a per-track output mux wire like "OUT_N0", "OUT_E3".
+fn parse_output_mux_wire(wire: &str) -> Option<(usize, usize)> {
+    let rest = wire.strip_prefix("OUT_")?;
+    let (dir_ch, track_str) = rest.split_at(1);
+    if track_str.is_empty() || !track_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let track: usize = track_str.parse().ok()?;
+    let dir = match dir_ch {
+        "N" => 0,
+        "E" => 1,
+        "S" => 2,
+        "W" => 3,
+        _ => return None,
+    };
+    Some((dir, track))
+}
+
+/// Map a source wire name to an input mux select value for T tracks.
+/// Encoding: dir*T + track for directional, 4*T for CLB_OUT.
+fn wire_to_input_sel(wire: &str, tracks: usize) -> Option<u64> {
+    if let Some((dir, track)) = parse_track_wire(wire) {
+        Some(tile_bits::mux_dir_track(dir, track, tracks))
+    } else if wire == "CLB_O" || wire == "CLB_Q" {
+        Some(tile_bits::mux_clb_out(tracks))
+    } else {
+        None
+    }
 }
 
 /// Parse a nextpnr parameter value.
-///
-/// Handles formats like "16'b0000000000000000", "16'h1234", or plain integers.
 fn parse_param(value: &str, width: usize) -> Option<u64> {
     if let Some(rest) = value.strip_prefix(&format!("{width}'b")) {
         u64::from_str_radix(rest, 2).ok()
     } else if let Some(rest) = value.strip_prefix(&format!("{width}'h")) {
         u64::from_str_radix(rest, 16).ok()
+    } else if !value.is_empty() && value.chars().all(|c| c == '0' || c == '1') {
+        // Plain binary string (nextpnr $lut LUT parameter format)
+        u64::from_str_radix(value, 2).ok()
     } else {
         value.parse().ok()
     }
@@ -488,10 +654,14 @@ mod tests {
         .unwrap()
     }
 
+    /// Create PnR output with a LUT at descriptor coords (x, y).
+    /// Adds +1 to simulate viaduct IO ring offset.
     fn test_pnr_with_lut(x: i64, y: i64, init: &str) -> PnrOutput {
+        let gx = x + 1;
+        let gy = y + 1;
         let mut cells = HashMap::new();
         let mut attrs = HashMap::new();
-        attrs.insert("place".to_string(), format!("X{x}/Y{y}/LUT4"));
+        attrs.insert("place".to_string(), format!("X{gx}/Y{gy}/LUT4"));
         let mut params = HashMap::new();
         params.insert("INIT".to_string(), init.to_string());
         cells.insert(
@@ -514,11 +684,26 @@ mod tests {
         PnrOutput { modules }
     }
 
+    /// Create a PnR output with routing pips.
+    /// Each pip is "dst_wire;pip_name;1" in ROUTING format.
     fn test_pnr_with_routing(pips: &[&str]) -> PnrOutput {
         let mut netnames = HashMap::new();
-        let route_str = pips.join(" ");
+        // Build ROUTING attribute: wire;pip;strength triplets
+        let mut route_parts = Vec::new();
+        for pip in pips {
+            // pip format: "X{x}/Y{y}/dst/X{x}/Y{y}/src"
+            // Extract the dst wire (first 3 parts) as the wire entry
+            let wire_parts: Vec<&str> = pip.split('/').collect();
+            let wire = if wire_parts.len() >= 3 {
+                format!("{}/{}/{}", wire_parts[0], wire_parts[1], wire_parts[2])
+            } else {
+                pip.to_string()
+            };
+            route_parts.push(format!("{};{};1", wire, pip));
+        }
+        let route_str = route_parts.join(";");
         let mut attrs = HashMap::new();
-        attrs.insert("route".to_string(), Value::String(route_str));
+        attrs.insert("ROUTING".to_string(), Value::String(route_str));
         netnames.insert(
             "net0".to_string(),
             PnrNet {
@@ -572,7 +757,7 @@ mod tests {
         let desc = test_descriptor();
         let mut cells = HashMap::new();
         let mut attrs = HashMap::new();
-        attrs.insert("place".to_string(), "X0/Y0/DFF".to_string());
+        attrs.insert("place".to_string(), "X1/Y1/DFF".to_string());
         cells.insert(
             "dff0".to_string(),
             PnrCell {
@@ -600,7 +785,7 @@ mod tests {
         let desc = test_descriptor();
         let mut cells = HashMap::new();
         let mut attrs = HashMap::new();
-        attrs.insert("place".to_string(), "X1/Y1/CARRY".to_string());
+        attrs.insert("place".to_string(), "X2/Y2/CARRY".to_string());
         cells.insert(
             "carry0".to_string(),
             PnrCell {
@@ -627,83 +812,98 @@ mod tests {
     #[test]
     fn pack_routing_input_mux_north() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X0/Y0/MUX_I0_N"]);
+        let tracks = 1;
+        let pnr = test_pnr_with_routing(&["X1/Y1/CLB_I0/X1/Y1/N0"]);
         let bits = pack(&desc, &pnr);
 
-        // sel0 is at bits [20:18] of tile config
-        let sel = read_bits(&bits, 64 + tile_bits::SEL_BASE, tile_bits::SEL_WIDTH);
-        assert_eq!(sel, tile_bits::MUX_NORTH);
+        let isw = tile_bits::input_sel_width(tracks);
+        let sel = read_bits(&bits, 64 + tile_bits::input_sel_offset(0, tracks), isw);
+        assert_eq!(sel, tile_bits::mux_dir_track(0, 0, tracks)); // N0
     }
 
     #[test]
     fn pack_routing_input_mux_east() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X1/Y0/MUX_I2_E"]);
+        let tracks = 1;
+        let pnr = test_pnr_with_routing(&["X2/Y1/CLB_I2/X2/Y1/E0"]);
         let bits = pack(&desc, &pnr);
 
-        // sel2 at tile (1,0): offset 46, sel2 starts at 18 + 2*3 = 24
-        let sel = read_bits(
-            &bits,
-            64 + 46 + tile_bits::SEL_BASE + 2 * tile_bits::SEL_WIDTH,
-            tile_bits::SEL_WIDTH,
-        );
-        assert_eq!(sel, tile_bits::MUX_EAST);
+        let isw = tile_bits::input_sel_width(tracks);
+        let sel = read_bits(&bits, 64 + 46 + tile_bits::input_sel_offset(2, tracks), isw);
+        assert_eq!(sel, tile_bits::mux_dir_track(1, 0, tracks)); // E0
     }
 
     #[test]
     fn pack_routing_input_mux_feedback() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X0/Y0/MUX_I1_FB"]);
+        let tracks = 1;
+        let pnr = test_pnr_with_routing(&["X1/Y1/CLB_I1/X1/Y1/CLB_O"]);
         let bits = pack(&desc, &pnr);
 
-        let sel = read_bits(
-            &bits,
-            64 + tile_bits::SEL_BASE + 1 * tile_bits::SEL_WIDTH,
-            tile_bits::SEL_WIDTH,
-        );
-        assert_eq!(sel, tile_bits::MUX_CLB_OUT);
+        let isw = tile_bits::input_sel_width(tracks);
+        let sel = read_bits(&bits, 64 + tile_bits::input_sel_offset(1, tracks), isw);
+        assert_eq!(sel, tile_bits::mux_clb_out(tracks));
     }
 
     #[test]
     fn pack_routing_output_north() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X0/Y0/RT_N0_CLB"]);
+        let tracks = 1;
+        let pnr = test_pnr_with_routing(&["X1/Y1/OUT_N0/X1/Y1/CLB_O"]);
         let bits = pack(&desc, &pnr);
 
-        // enNorth should be set
-        assert_ne!(read_bits(&bits, 64 + tile_bits::EN_NORTH, 1), 0);
-        // selNorth should be MUX_CLB_OUT
-        let sel = read_bits(&bits, 64 + tile_bits::SEL_NORTH, tile_bits::SEL_WIDTH);
-        assert_eq!(sel, tile_bits::MUX_CLB_OUT);
+        assert_ne!(
+            read_bits(&bits, 64 + tile_bits::output_en(0, 0, tracks), 1),
+            0
+        );
+        let sel = read_bits(
+            &bits,
+            64 + tile_bits::output_sel(0, 0, tracks),
+            tile_bits::OUTPUT_SEL_WIDTH,
+        );
+        assert_eq!(sel, tile_bits::OUT_MUX_CLB);
     }
 
     #[test]
     fn pack_routing_output_west() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X1/Y1/RT_W0_Q"]);
+        let tracks = 1;
+        let pnr = test_pnr_with_routing(&["X2/Y2/OUT_W0/X2/Y2/CLB_Q"]);
         let bits = pack(&desc, &pnr);
 
         // tile (1,1) offset=138
-        assert_ne!(read_bits(&bits, 64 + 138 + tile_bits::EN_WEST, 1), 0);
-        let sel = read_bits(&bits, 64 + 138 + tile_bits::SEL_WEST, tile_bits::SEL_WIDTH);
-        assert_eq!(sel, tile_bits::MUX_CLB_OUT);
+        assert_ne!(
+            read_bits(&bits, 64 + 138 + tile_bits::output_en(3, 0, tracks), 1),
+            0
+        );
+        let sel = read_bits(
+            &bits,
+            64 + 138 + tile_bits::output_sel(3, 0, tracks),
+            tile_bits::OUTPUT_SEL_WIDTH,
+        );
+        assert_eq!(sel, tile_bits::OUT_MUX_CLB);
     }
 
     #[test]
     fn pack_multiple_pips_same_tile() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X0/Y0/MUX_I0_N", "X0/Y0/MUX_I1_E", "X0/Y0/RT_S0_CLB"]);
+        let tracks = 1;
+        let pnr = test_pnr_with_routing(&[
+            "X1/Y1/CLB_I0/X1/Y1/N0",
+            "X1/Y1/CLB_I1/X1/Y1/E0",
+            "X1/Y1/OUT_S0/X1/Y1/CLB_O",
+        ]);
         let bits = pack(&desc, &pnr);
 
-        let sel0 = read_bits(&bits, 64 + tile_bits::SEL_BASE, tile_bits::SEL_WIDTH);
-        let sel1 = read_bits(
-            &bits,
-            64 + tile_bits::SEL_BASE + tile_bits::SEL_WIDTH,
-            tile_bits::SEL_WIDTH,
+        let isw = tile_bits::input_sel_width(tracks);
+        let sel0 = read_bits(&bits, 64 + tile_bits::input_sel_offset(0, tracks), isw);
+        let sel1 = read_bits(&bits, 64 + tile_bits::input_sel_offset(1, tracks), isw);
+        assert_eq!(sel0, tile_bits::mux_dir_track(0, 0, tracks)); // N0
+        assert_eq!(sel1, tile_bits::mux_dir_track(1, 0, tracks)); // E0
+        assert_ne!(
+            read_bits(&bits, 64 + tile_bits::output_en(2, 0, tracks), 1),
+            0
         );
-        assert_eq!(sel0, tile_bits::MUX_NORTH);
-        assert_eq!(sel1, tile_bits::MUX_EAST);
-        assert_ne!(read_bits(&bits, 64 + tile_bits::EN_SOUTH, 1), 0);
     }
 
     #[test]
@@ -724,11 +924,11 @@ mod tests {
     }
 
     #[test]
-    fn inter_tile_pips_dont_set_bits() {
+    fn io_tile_pips_dont_set_fabric_bits() {
         let desc = test_descriptor();
-        let pnr = test_pnr_with_routing(&["X0/Y0/NORTH0_UP", "X0/Y0/GLB_CLK"]);
+        // Pip at tile (99,99) which doesn't exist in the fabric
+        let pnr = test_pnr_with_routing(&["X99/Y99/N0/X99/Y99/CLB_O"]);
         let bits = pack(&desc, &pnr);
-        // These pips are physical connections, no config bits
         assert!(bits.iter().all(|&b| b == 0));
     }
 }

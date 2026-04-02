@@ -16,9 +16,9 @@ let
 
   commonArgs = {
     inherit src;
-    pname = "aegis-pack";
+    pname = "aegis-sim";
     strictDeps = true;
-    cargoExtraArgs = "--package aegis-pack";
+    cargoExtraArgs = "--package aegis-sim";
   };
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -32,8 +32,8 @@ craneLib.buildPackage (
     CARGO_PROFILE_RELEASE_OPT_LEVEL = "2";
 
     meta = {
-      description = "Bitstream packer for Aegis FPGA";
-      mainProgram = "aegis-pack";
+      description = "Fast cycle-accurate simulator for Aegis FPGA";
+      mainProgram = "aegis-sim";
     };
   }
 )

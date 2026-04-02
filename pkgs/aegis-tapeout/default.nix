@@ -1,10 +1,14 @@
 {
   lib,
   stdenv,
+  mkShell,
   yosys,
   openroad,
   xschem,
   klayout,
+  magic-vlsi,
+  ngspice,
+  surfer,
   aegis-ip,
 }:
 
@@ -212,6 +216,22 @@ lib.extendMkDerivation {
           tracks
           ;
         ip = aegis-ip;
+        shell = mkShell {
+          name = "aegis-tapeout-${aegis-ip.deviceName}-shell";
+
+          packages = [
+            yosys
+            openroad
+            xschem
+            klayout
+            magic-vlsi
+            ngspice
+            surfer
+          ];
+
+          PDK_NAME = pdk.pdkName;
+          PDK_CELL_LIB = cellLib;
+        };
       }
       // (args.passthru or { });
     };

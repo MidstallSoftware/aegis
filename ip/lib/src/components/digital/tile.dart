@@ -1,4 +1,5 @@
 import 'package:rohd/rohd.dart';
+import '../../config/tile_config.dart';
 import 'clb.dart';
 
 enum TilePortGroup { routing }
@@ -38,6 +39,10 @@ class Tile extends Module {
   Logic get carryIn => input('carryIn');
   Logic get carryOut => output('carryOut');
 
+  final int tracks;
+
+  int get configWidth => tileConfigWidth(tracks);
+
   Tile(
     Logic clk,
     Logic reset,
@@ -46,6 +51,7 @@ class Tile extends Module {
     TileInterface input,
     TileInterface output, {
     required Logic carryIn,
+    this.tracks = 1,
   }) : super(name: 'tile') {
     clk = addInput('clk', clk);
     reset = addInput('reset', reset);
@@ -75,19 +81,20 @@ class Tile extends Module {
         uniquify: (orig) => 'output_$orig',
       );
 
-    final shiftReg = Logic(width: CONFIG_WIDTH, name: 'shiftReg');
-    final configReg = Logic(width: CONFIG_WIDTH, name: 'configReg');
+    final cw = configWidth;
+    final shiftReg = Logic(width: cw, name: 'shiftReg');
+    final configReg = Logic(width: cw, name: 'configReg');
 
     Sequential(
       clk,
       [
-        shiftReg < [cfgIn, shiftReg.slice(CONFIG_WIDTH - 1, 1)].swizzle(),
+        shiftReg < [cfgIn, shiftReg.slice(cw - 1, 1)].swizzle(),
         If.s(cfgLoad, configReg < shiftReg),
       ],
       reset: reset,
       resetValues: {
-        shiftReg: Const(0, width: CONFIG_WIDTH),
-        configReg: Const(0, width: CONFIG_WIDTH),
+        shiftReg: Const(0, width: cw),
+        configReg: Const(0, width: cw),
       },
     );
 
@@ -95,109 +102,71 @@ class Tile extends Module {
     cfgOutBit <= shiftReg[0];
     cfgOut <= cfgOutBit;
 
-    // Config layout (46 bits):
-    //   [17:0]  CLB config (16 LUT + 1 FF enable + 1 carry mode)
-    //   [20:18] sel0 (CLB in0 source)
-    //   [23:21] sel1 (CLB in1 source)
-    //   [26:24] sel2 (CLB in2 source)
-    //   [29:27] sel3 (CLB in3 source)
-    //   [30]    enable north output
-    //   [31]    enable east output
-    //   [32]    enable south output
-    //   [33]    enable west output
-    //   [36:34] selNorth (north route source)
-    //   [39:37] selEast  (east route source)
-    //   [42:40] selSouth (south route source)
-    //   [45:43] selWest  (west route source)
+    // Config layout (parametric, see tile_config.dart):
+    //   [17:0]            CLB config
+    //   [18..18+4*ISW-1]  input mux sel0..sel3
+    //   [18+4*ISW..]      per-track output: (enable + 3-bit select) per track per direction
+
+    final isw = inputSelWidth(tracks);
 
     final clbConfig = configReg.slice(17, 0);
 
-    final sel0 = configReg.slice(20, 18);
-    final sel1 = configReg.slice(23, 21);
-    final sel2 = configReg.slice(26, 24);
-    final sel3 = configReg.slice(29, 27);
+    final sel = List.generate(4, (i) {
+      final lo = 18 + i * isw;
+      return configReg.slice(lo + isw - 1, lo);
+    });
 
-    final enNorth = configReg[30];
-    final enEast = configReg[31];
-    final enSouth = configReg[32];
-    final enWest = configReg[33];
-
-    final selNorth = configReg.slice(36, 34);
-    final selEast = configReg.slice(39, 37);
-    final selSouth = configReg.slice(42, 40);
-    final selWest = configReg.slice(45, 43);
+    final outBase = 18 + 4 * isw;
 
     final clbOut = Logic();
 
-    Logic selectInput(Logic sel) {
+    // Input mux: select from direction*T+track for directional, 4*T+{0,1,2} for internal
+    Logic selectInput(Logic selBits) {
       final result = Logic();
+      final nValues = 4 * tracks + 3;
 
-      final const0 = Const(0, width: 1);
-      final const1 = Const(1, width: 1);
+      // Build mux chain from highest value down
+      Logic chain = Const(0, width: 1);
 
-      result <=
-          mux(
-            sel.eq(Const(0, width: 3)),
-            input.north[0],
-            mux(
-              sel.eq(Const(1, width: 3)),
-              input.east[0],
-              mux(
-                sel.eq(Const(2, width: 3)),
-                input.south[0],
-                mux(
-                  sel.eq(Const(3, width: 3)),
-                  input.west[0],
-                  mux(
-                    sel.eq(Const(4, width: 3)),
-                    clbOut,
-                    mux(
-                      sel.eq(Const(5, width: 3)),
-                      const0,
-                      mux(sel.eq(Const(6, width: 3)), const1, const0),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+      // const1
+      chain = mux(
+        selBits.eq(Const(inputSelConst1(tracks), width: isw)),
+        Const(1, width: 1),
+        chain,
+      );
+      // const0
+      chain = mux(
+        selBits.eq(Const(inputSelConst0(tracks), width: isw)),
+        Const(0, width: 1),
+        chain,
+      );
+      // clbOut
+      chain = mux(
+        selBits.eq(Const(inputSelClbOut(tracks), width: isw)),
+        clbOut,
+        chain,
+      );
+
+      // Directional sources: W(T-1) down to N0
+      final dirPorts = [input.north, input.east, input.south, input.west];
+      for (var d = 3; d >= 0; d--) {
+        for (var t = tracks - 1; t >= 0; t--) {
+          chain = mux(
+            selBits.eq(Const(inputSelDir(d, t, tracks), width: isw)),
+            dirPorts[d][t],
+            chain,
           );
+        }
+      }
 
+      result <= chain;
       return result;
     }
 
-    List<Logic> selectRouteVec(Logic sel) {
-      final tracks = input.north.width;
-
-      return List.generate(tracks, (i) {
-        final result = Logic();
-
-        result <=
-            mux(
-              sel.eq(Const(0, width: 3)),
-              input.north[i],
-              mux(
-                sel.eq(Const(1, width: 3)),
-                input.east[i],
-                mux(
-                  sel.eq(Const(2, width: 3)),
-                  input.south[i],
-                  mux(
-                    sel.eq(Const(3, width: 3)),
-                    input.west[i],
-                    mux(sel.eq(Const(4, width: 3)), clbOut, Const(0, width: 1)),
-                  ),
-                ),
-              ),
-            );
-
-        return result;
-      });
-    }
-
-    final in0 = selectInput(sel0);
-    final in1 = selectInput(sel1);
-    final in2 = selectInput(sel2);
-    final in3 = selectInput(sel3);
+    final in0 = selectInput(sel[0]);
+    final in1 = selectInput(sel[1]);
+    final in2 = selectInput(sel[2]);
+    final in3 = selectInput(sel[3]);
 
     final clb = Clb(
       clk,
@@ -212,32 +181,37 @@ class Tile extends Module {
     clbOut <= clb.out;
     this.carryOut <= clb.carryOut;
 
-    final routeNorth = selectRouteVec(selNorth);
-    final routeEast = selectRouteVec(selEast);
-    final routeSouth = selectRouteVec(selSouth);
-    final routeWest = selectRouteVec(selWest);
+    // Per-track output routing
+    final dirPorts = [input.north, input.east, input.south, input.west];
+    final dirOutputs = [<Logic>[], <Logic>[], <Logic>[], <Logic>[]];
 
-    output.north <=
-        routeNorth.reversed
-            .map((b) => mux(enNorth, b, Const(0, width: 1)))
-            .toList()
-            .swizzle();
-    output.east <=
-        routeEast.reversed
-            .map((b) => mux(enEast, b, Const(0, width: 1)))
-            .toList()
-            .swizzle();
-    output.south <=
-        routeSouth.reversed
-            .map((b) => mux(enSouth, b, Const(0, width: 1)))
-            .toList()
-            .swizzle();
-    output.west <=
-        routeWest.reversed
-            .map((b) => mux(enWest, b, Const(0, width: 1)))
-            .toList()
-            .swizzle();
+    for (var d = 0; d < 4; d++) {
+      for (var t = 0; t < tracks; t++) {
+        final bitOff = outBase + (d * tracks + t) * 4;
+        final en = configReg[bitOff];
+        final selOut = configReg.slice(bitOff + 3, bitOff + 1);
+
+        // Output mux: select source direction (same track index)
+        Logic routeVal = Const(0, width: 1);
+        routeVal = mux(selOut.eq(Const(4, width: 3)), clbOut, routeVal);
+        for (var s = 3; s >= 0; s--) {
+          routeVal = mux(
+            selOut.eq(Const(s, width: 3)),
+            dirPorts[s][t],
+            routeVal,
+          );
+        }
+
+        dirOutputs[d].add(mux(en, routeVal, Const(0, width: 1)));
+      }
+    }
+
+    output.north <= dirOutputs[0].reversed.toList().swizzle();
+    output.east <= dirOutputs[1].reversed.toList().swizzle();
+    output.south <= dirOutputs[2].reversed.toList().swizzle();
+    output.west <= dirOutputs[3].reversed.toList().swizzle();
   }
 
+  // For backward compatibility (T=1)
   static const int CONFIG_WIDTH = 46;
 }
