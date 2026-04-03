@@ -1,0 +1,3 @@
+set_io clk  X0/Y1/IO0
+set_io din  X0/Y2/IO0
+set_io dout X0/Y3/IO0

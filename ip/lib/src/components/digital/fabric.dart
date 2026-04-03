@@ -1,4 +1,5 @@
 import 'package:rohd/rohd.dart';
+import '../../config/tile_config.dart';
 import 'bram_tile.dart';
 import 'dsp_basic_tile.dart';
 import 'tile.dart';
@@ -34,6 +35,7 @@ class LutFabric extends Module {
   int get totalConfigBits => configBitsFor(
     width: width,
     height: height,
+    tracks: tracks,
     bramColumnInterval: bramColumnInterval,
     dspColumnInterval: dspColumnInterval,
   );
@@ -42,6 +44,7 @@ class LutFabric extends Module {
   static int configBitsFor({
     required int width,
     required int height,
+    int tracks = 1,
     int bramColumnInterval = 0,
     int dspColumnInterval = 0,
   }) {
@@ -54,6 +57,7 @@ class LutFabric extends Module {
       dspColumnInterval: dspColumnInterval,
       bramColumnInterval: bramColumnInterval,
     );
+    final lutTileWidth = tileConfigWidth(tracks);
     int bits = 0;
     for (int x = 0; x < width; x++) {
       if (bram.contains(x)) {
@@ -61,7 +65,7 @@ class LutFabric extends Module {
       } else if (dsp.contains(x)) {
         bits += height * DspBasicTile.CONFIG_WIDTH;
       } else {
-        bits += height * Tile.CONFIG_WIDTH;
+        bits += height * lutTileWidth;
       }
     }
     return bits;
@@ -107,6 +111,7 @@ class LutFabric extends Module {
   static Map<String, dynamic> tileGridDescriptor({
     required int width,
     required int height,
+    int tracks = 1,
     int bramColumnInterval = 0,
     int dspColumnInterval = 0,
   }) {
@@ -119,6 +124,7 @@ class LutFabric extends Module {
       dspColumnInterval: dspColumnInterval,
       bramColumnInterval: bramColumnInterval,
     );
+    final lutTileWidth = tileConfigWidth(tracks);
     final tiles = <Map<String, dynamic>>[];
     int offset = 0;
     for (int y = 0; y < height; y++) {
@@ -133,7 +139,7 @@ class LutFabric extends Module {
           w = DspBasicTile.CONFIG_WIDTH;
         } else {
           type = 'lut';
-          w = Tile.CONFIG_WIDTH;
+          w = lutTileWidth;
         }
         tiles.add({
           'x': x,
@@ -237,6 +243,7 @@ class LutFabric extends Module {
             tileIn,
             tileOut,
             carryIn: tileCarryIn,
+            tracks: tracks,
           );
         }
 

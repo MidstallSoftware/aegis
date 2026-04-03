@@ -1,0 +1,5 @@
+set_io clk    X0/Y1/IO0
+set_io out[0] X0/Y2/IO0
+set_io out[1] X0/Y3/IO0
+set_io out[2] X0/Y4/IO0
+set_io out[3] X0/Y5/IO0

@@ -1,0 +1,6 @@
+set_io a       X0/Y1/IO0
+set_io b       X0/Y2/IO0
+set_io out_and X0/Y3/IO0
+set_io out_or  X0/Y4/IO0
+set_io out_xor X0/Y5/IO0
+set_io out_not X0/Y6/IO0

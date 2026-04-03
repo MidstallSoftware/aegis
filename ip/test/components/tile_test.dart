@@ -9,14 +9,14 @@ void main() {
   });
 
   group('Tile', () {
-    test('config chain shifts bits through', () async {
+    test('config chain shifts bits through (T=1)', () async {
       final clk = SimpleClockGenerator(10).clk;
       final reset = Logic();
       final cfgIn = Logic();
       final cfgLoad = Logic();
       final carryIn = Logic();
-      final tileIn = TileInterface(width: 4);
-      final tileOut = TileInterface(width: 4);
+      final tileIn = TileInterface(width: 1);
+      final tileOut = TileInterface(width: 1);
 
       final tile = Tile(
         clk,
@@ -26,6 +26,7 @@ void main() {
         tileIn,
         tileOut,
         carryIn: carryIn,
+        tracks: 1,
       );
       await tile.build();
 
@@ -44,7 +45,9 @@ void main() {
       reset.put(0);
       await clk.nextPosedge;
 
-      for (int i = 0; i < Tile.CONFIG_WIDTH; i++) {
+      // Shift all 1s through the config chain
+      final cw = tileConfigWidth(1);
+      for (int i = 0; i < cw; i++) {
         cfgIn.put(1);
         await clk.nextPosedge;
       }
@@ -54,7 +57,7 @@ void main() {
       await Simulator.endSimulation();
     });
 
-    test('carry chain pass-through', () async {
+    test('config chain shifts bits through (T=4)', () async {
       final clk = SimpleClockGenerator(10).clk;
       final reset = Logic();
       final cfgIn = Logic();
@@ -71,6 +74,55 @@ void main() {
         tileIn,
         tileOut,
         carryIn: carryIn,
+        tracks: 4,
+      );
+      await tile.build();
+
+      unawaited(Simulator.run());
+
+      reset.put(1);
+      cfgIn.put(0);
+      cfgLoad.put(0);
+      carryIn.put(0);
+      tileIn.north.put(0);
+      tileIn.east.put(0);
+      tileIn.south.put(0);
+      tileIn.west.put(0);
+      await clk.nextPosedge;
+
+      reset.put(0);
+      await clk.nextPosedge;
+
+      final cw = tileConfigWidth(4);
+      expect(cw, 102); // 18 + 4*5 + 4*4*4
+      for (int i = 0; i < cw; i++) {
+        cfgIn.put(1);
+        await clk.nextPosedge;
+      }
+
+      expect(tile.cfgOut.value.toInt(), 1);
+
+      await Simulator.endSimulation();
+    });
+
+    test('carry chain pass-through', () async {
+      final clk = SimpleClockGenerator(10).clk;
+      final reset = Logic();
+      final cfgIn = Logic();
+      final cfgLoad = Logic();
+      final carryIn = Logic();
+      final tileIn = TileInterface(width: 1);
+      final tileOut = TileInterface(width: 1);
+
+      final tile = Tile(
+        clk,
+        reset,
+        cfgIn,
+        cfgLoad,
+        tileIn,
+        tileOut,
+        carryIn: carryIn,
+        tracks: 1,
       );
       await tile.build();
 

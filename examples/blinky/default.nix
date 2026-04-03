@@ -8,7 +8,9 @@
 {
   lib,
   stdenvNoCC,
+  mkShell,
   yosys,
+  surfer,
   aegis-ip,
 }:
 
@@ -24,7 +26,6 @@ stdenvNoCC.mkDerivation {
     fileset = lib.fileset.unions [
       ./blinky.v
       ./blinky.pcf
-      ./place_io.py
     ];
   };
 
@@ -49,9 +50,9 @@ stdenvNoCC.mkDerivation {
     yosys -c synth.tcl > yosys.log 2>&1 || { cat yosys.log; exit 1; }
 
     echo "=== Place and route ==="
-    PCF_FILE=blinky.pcf nextpnr-aegis-${deviceName} \
+    nextpnr-aegis-${deviceName} \
+      -o pcf=blinky.pcf \
       --json blinky_pnr.json \
-      --pre-place place_io.py \
       --write blinky_routed.json \
       > nextpnr.log 2>&1 || { cat nextpnr.log; echo "nextpnr finished (may have warnings)"; }
 
@@ -78,4 +79,13 @@ stdenvNoCC.mkDerivation {
 
     runHook postInstall
   '';
+
+  passthru.shell = mkShell {
+    name = "aegis-blinky-${deviceName}-shell";
+    packages = [
+      yosys
+      tools
+      surfer
+    ];
+  };
 }

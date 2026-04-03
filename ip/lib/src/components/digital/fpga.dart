@@ -81,6 +81,7 @@ class AegisFPGA extends Module {
         LutFabric.configBitsFor(
           width: width,
           height: height,
+          tracks: tracks,
           bramColumnInterval: bramColumnInterval,
           dspColumnInterval: dspColumnInterval,
         ) +
@@ -169,6 +170,7 @@ class AegisFPGA extends Module {
     final fabricBits = LutFabric.configBitsFor(
       width: width,
       height: height,
+      tracks: tracks,
       bramColumnInterval: bramColumnInterval,
       dspColumnInterval: dspColumnInterval,
     );
@@ -180,6 +182,7 @@ class AegisFPGA extends Module {
     final grid = LutFabric.tileGridDescriptor(
       width: width,
       height: height,
+      tracks: tracks,
       bramColumnInterval: bramColumnInterval,
       dspColumnInterval: dspColumnInterval,
     );

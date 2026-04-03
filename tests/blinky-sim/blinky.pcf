@@ -1,0 +1,6 @@
+# Pin constraints for blinky on Aegis
+# Format: set_io <signal> <bel_name>
+# IO BELs are named X<x>/Y<y>/IO<z> on the grid edges
+set_io clk   X0/Y1/IO0
+set_io reset X0/Y2/IO0
+set_io led   X0/Y3/IO0
