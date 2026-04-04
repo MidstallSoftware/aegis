@@ -1,82 +1,6 @@
-use aegis_desc::*;
-
-/// Tile config bit layout (parametric, matches Dart tile_config.dart).
-mod tile_bits {
-    pub const LUT_INIT: usize = 0;
-    pub const FF_ENABLE: usize = 16;
-    pub const CARRY_MODE: usize = 17;
-    pub const INPUT_SEL_BASE: usize = 18;
-
-    pub fn input_sel_width(tracks: usize) -> usize {
-        let n = 4 * tracks + 3;
-        (usize::BITS - (n - 1).leading_zeros()) as usize
-    }
-
-    pub fn input_sel_offset(idx: usize, tracks: usize) -> usize {
-        INPUT_SEL_BASE + idx * input_sel_width(tracks)
-    }
-
-    pub fn output_base(tracks: usize) -> usize {
-        INPUT_SEL_BASE + 4 * input_sel_width(tracks)
-    }
-
-    pub fn output_en(dir: usize, track: usize, tracks: usize) -> usize {
-        output_base(tracks) + (dir * tracks + track) * 4
-    }
-
-    pub fn output_sel(dir: usize, track: usize, tracks: usize) -> usize {
-        output_base(tracks) + (dir * tracks + track) * 4 + 1
-    }
-
-    pub fn tile_config_width(tracks: usize) -> usize {
-        18 + 4 * input_sel_width(tracks) + 4 * tracks * 4
-    }
-}
-
-/// Decoded tile configuration with per-track output muxes.
-#[derive(Clone)]
-pub(crate) struct TileConfig {
-    pub(crate) lut_init: u16,
-    pub(crate) ff_enable: bool,
-    pub(crate) carry_mode: bool,
-    pub(crate) sel: [u8; 4],           // input mux selects (widened encoding)
-    pub(crate) en_out: Vec<Vec<bool>>, // en_out[dir][track]
-    pub(crate) sel_out: Vec<Vec<u8>>,  // sel_out[dir][track]
-}
-
-impl Default for TileConfig {
-    fn default() -> Self {
-        Self {
-            lut_init: 0,
-            ff_enable: false,
-            carry_mode: false,
-            sel: [0; 4],
-            en_out: vec![vec![]; 4],
-            sel_out: vec![vec![]; 4],
-        }
-    }
-}
-
-impl TileConfig {
-    fn default_for(tracks: usize) -> Self {
-        Self {
-            lut_init: 0,
-            ff_enable: false,
-            carry_mode: false,
-            sel: [0; 4],
-            en_out: vec![vec![false; tracks]; 4],
-            sel_out: vec![vec![0; tracks]; 4],
-        }
-    }
-
-    fn has_any_config(&self) -> bool {
-        self.lut_init != 0
-            || self.ff_enable
-            || self.carry_mode
-            || self.en_out.iter().any(|d| d.iter().any(|&e| e))
-            || self.sel.iter().any(|&s| s != 0)
-    }
-}
+use aegis_ip::tile_bits;
+use aegis_ip::tile_bits::TileConfig;
+use aegis_ip::*;
 
 /// Per-tile simulation state with per-track outputs.
 #[derive(Clone)]
@@ -154,7 +78,7 @@ impl Simulator {
                             let dy = gy - 1;
                             if let Some(&(offset, config_width)) = tile_offsets.get(&(dx, dy)) {
                                 if config_width >= min_width {
-                                    decode_tile_config(bitstream, fabric_base + offset, tracks)
+                                    TileConfig::decode(bitstream, fabric_base + offset, tracks)
                                 } else {
                                     TileConfig::default_for(tracks)
                                 }
@@ -397,58 +321,6 @@ impl Simulator {
             4 => clb_out,
             _ => false,
         }
-    }
-}
-
-/// Decode a tile config from bitstream bits at the given offset.
-pub(crate) fn decode_tile_config(bitstream: &[u8], bit_offset: usize, tracks: usize) -> TileConfig {
-    let read_bit = |off: usize| -> bool {
-        let byte_idx = (bit_offset + off) / 8;
-        let bit_idx = (bit_offset + off) % 8;
-        if byte_idx < bitstream.len() {
-            (bitstream[byte_idx] >> bit_idx) & 1 == 1
-        } else {
-            false
-        }
-    };
-
-    let read_bits = |off: usize, width: usize| -> u16 {
-        let mut val = 0u16;
-        for i in 0..width {
-            if read_bit(off + i) {
-                val |= 1 << i;
-            }
-        }
-        val
-    };
-
-    let isw = tile_bits::input_sel_width(tracks);
-
-    let sel = std::array::from_fn(|i| read_bits(tile_bits::input_sel_offset(i, tracks), isw) as u8);
-
-    let en_out = (0..4)
-        .map(|d| {
-            (0..tracks)
-                .map(|t| read_bit(tile_bits::output_en(d, t, tracks)))
-                .collect()
-        })
-        .collect();
-
-    let sel_out = (0..4)
-        .map(|d| {
-            (0..tracks)
-                .map(|t| read_bits(tile_bits::output_sel(d, t, tracks), 3) as u8)
-                .collect()
-        })
-        .collect();
-
-    TileConfig {
-        lut_init: read_bits(tile_bits::LUT_INIT, 16),
-        ff_enable: read_bit(tile_bits::FF_ENABLE),
-        carry_mode: read_bit(tile_bits::CARRY_MODE),
-        sel,
-        en_out,
-        sel_out,
     }
 }
 

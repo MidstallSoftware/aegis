@@ -119,6 +119,24 @@
               terra-1-logic-gates = pkgs.callPackage ./tests/logic-gates {
                 aegis-ip = terra-1;
               };
+              # Formal verification checks
+              terra-1-tile-bits = pkgs.callPackage ./tests/tile-bits-consistency {
+                aegis-ip = terra-1;
+              };
+              terra-1-synth-equiv-comb = pkgs.callPackage ./tests/synth-equiv {
+                aegis-ip = terra-1;
+                design = "comb";
+              };
+              terra-1-synth-equiv-counter = pkgs.callPackage ./tests/synth-equiv {
+                aegis-ip = terra-1;
+                design = "counter";
+              };
+              terra-1-formal-ip = pkgs.callPackage ./tests/formal-ip {
+                aegis-ip = terra-1;
+              };
+              terra-1-gds-verify = pkgs.callPackage ./tests/gds-verify {
+                aegis-tapeout = self.packages.${system}.terra-1-tapeout;
+              };
             };
 
           devShells = {

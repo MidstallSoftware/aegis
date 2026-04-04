@@ -1,4 +1,4 @@
-use aegis_desc::*;
+use aegis_ip::*;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -40,73 +40,7 @@ pub struct PnrModule {
     pub netnames: HashMap<String, PnrNet>,
 }
 
-/// Tile config bit layout (parametric, matches Dart tile_config.dart).
-///
-/// Layout for T tracks:
-///   [17:0]              CLB config (16 LUT + 1 FF enable + 1 carry mode)
-///   [18..18+4*ISW-1]    input mux sel0..sel3 (ISW = input_sel_width(T))
-///   [18+4*ISW..]        per-track output: 4 dirs × T tracks × (1 en + 3 sel)
-///
-/// For T=1: 46 bits (backward compatible)
-/// For T=4: 102 bits
-mod tile_bits {
-    pub const LUT_INIT: usize = 0;
-    pub const LUT_INIT_WIDTH: usize = 16;
-    pub const FF_ENABLE: usize = 16;
-    pub const CARRY_MODE: usize = 17;
-
-    pub const INPUT_SEL_BASE: usize = 18;
-
-    /// Width of input select field for T tracks.
-    pub fn input_sel_width(tracks: usize) -> usize {
-        let n = 4 * tracks + 3;
-        (usize::BITS - (n - 1).leading_zeros()) as usize
-    }
-
-    /// Bit offset of input sel[idx] for T tracks.
-    pub fn input_sel_offset(idx: usize, tracks: usize) -> usize {
-        INPUT_SEL_BASE + idx * input_sel_width(tracks)
-    }
-
-    /// Base offset of the per-track output section.
-    pub fn output_base(tracks: usize) -> usize {
-        INPUT_SEL_BASE + 4 * input_sel_width(tracks)
-    }
-
-    /// Enable bit offset for output (dir, track).
-    pub fn output_en(dir: usize, track: usize, tracks: usize) -> usize {
-        output_base(tracks) + (dir * tracks + track) * 4
-    }
-
-    /// Select field offset for output (dir, track). 3 bits wide.
-    pub fn output_sel(dir: usize, track: usize, tracks: usize) -> usize {
-        output_base(tracks) + (dir * tracks + track) * 4 + 1
-    }
-
-    pub const OUTPUT_SEL_WIDTH: usize = 3;
-
-    /// Total tile config width for T tracks.
-    pub fn tile_config_width(tracks: usize) -> usize {
-        18 + 4 * input_sel_width(tracks) + 4 * tracks * 4
-    }
-
-    /// Input mux select value for direction + track.
-    pub fn mux_dir_track(dir: usize, track: usize, tracks: usize) -> u64 {
-        (dir * tracks + track) as u64
-    }
-
-    /// Input mux select value for CLB output.
-    pub fn mux_clb_out(tracks: usize) -> u64 {
-        (4 * tracks) as u64
-    }
-
-    /// Output mux select values (same as direction indices + CLB).
-    pub const OUT_MUX_NORTH: u64 = 0;
-    pub const OUT_MUX_EAST: u64 = 1;
-    pub const OUT_MUX_SOUTH: u64 = 2;
-    pub const OUT_MUX_WEST: u64 = 3;
-    pub const OUT_MUX_CLB: u64 = 4;
-}
+use aegis_ip::tile_bits;
 
 /// Pack a nextpnr-placed design into a bitstream.
 ///
@@ -203,28 +137,7 @@ fn parse_xy(s: &str) -> Option<(i64, i64)> {
     Some((x, y))
 }
 
-/// Set a bit in the bitstream.
-fn set_bit(bits: &mut [u8], offset: usize) {
-    bits[offset / 8] |= 1 << (offset % 8);
-}
-
-/// Clear bits in the bitstream at a given bit offset and width.
-fn clear_bits(bits: &mut [u8], offset: usize, width: usize) {
-    for i in 0..width {
-        bits[(offset + i) / 8] &= !(1 << ((offset + i) % 8));
-    }
-}
-
-/// Write a value into the bitstream at a given bit offset and width.
-/// Clears the field first, then sets the new value.
-fn write_bits(bits: &mut [u8], offset: usize, value: u64, width: usize) {
-    clear_bits(bits, offset, width);
-    for i in 0..width {
-        if value & (1 << i) != 0 {
-            set_bit(bits, offset + i);
-        }
-    }
-}
+use aegis_ip::tile_bits::{set_bit, write_bits};
 
 fn pack_lut4(
     bits: &mut [u8],
@@ -450,7 +363,6 @@ fn pack_routing_pip(
         }
     }
 
-    // Inter-tile pips are hardwired — no config bits needed.
     if src_gx != dst_gx || src_gy != dst_gy {
         return;
     }
@@ -497,10 +409,6 @@ fn pack_routing_pip(
         );
         return;
     }
-
-    // Fan-out pip: dst is N{t}/E{t}/S{t}/W{t} — hardwired, no config.
-    // CLK pip: dst is CLK — no config bits in current architecture.
-    // FF_D pip: dst is FF_D — internal, no config.
 }
 
 /// Parse a track wire name like "N0", "E3" into (direction, track).

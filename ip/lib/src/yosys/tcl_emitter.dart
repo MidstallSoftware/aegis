@@ -45,8 +45,13 @@ class YosysTclEmitter {
   }
 
   void _writeSynth(StringBuffer buf) {
-    buf.writeln('# Synthesis');
-    buf.writeln('yosys synth -top $moduleName -flatten');
+    buf.writeln('# Hierarchical synthesis (no -flatten)');
+    buf.writeln('#');
+    buf.writeln('# Each unique tile module (Tile, BramTile, etc.) is');
+    buf.writeln('# synthesized once and reused across all instances.');
+    buf.writeln('# Flattening a ${width}x$height fabric would require');
+    buf.writeln('# hundreds of GB of RAM.');
+    buf.writeln('yosys synth -top $moduleName');
     buf.writeln();
   }
 

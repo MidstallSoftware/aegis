@@ -1,8 +1,8 @@
 [package]
-name = "aegis-desc"
+name = "aegis-ip"
 version.workspace = true
 edition.workspace = true
-description = "Aegis FPGA device descriptor types generated from JSON Schema"
+description = "Aegis FPGA device descriptor types and tile config bit layout"
 
 [dependencies]
 serde = { workspace = true }

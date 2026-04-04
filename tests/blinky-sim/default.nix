@@ -13,8 +13,7 @@
 }:
 
 let
-  tools = aegis-ip.tools;
-  deviceName = aegis-ip.deviceName;
+  inherit (aegis-ip) tools deviceName;
 in
 stdenvNoCC.mkDerivation {
   name = "aegis-blinky-sim-test-${deviceName}";
@@ -82,10 +81,10 @@ stdenvNoCC.mkDerivation {
 
     # Verify IO pads are active (signals propagating through fabric)
     if grep -q "Active IO pads:.*\b" sim.log && ! grep -q "Active IO pads: \[\]" sim.log; then
-      echo "PASS: IO pads are active — fabric is driving outputs"
+      echo "PASS: IO pads are active, fabric is driving outputs"
     else
       echo "PASS: Toolchain completed (synth -> PnR -> pack -> sim)"
-      echo "NOTE: No active IO pads yet — functional verification pending"
+      echo "NOTE: No active IO pads yet, functional verification pending"
     fi
 
     runHook postBuild

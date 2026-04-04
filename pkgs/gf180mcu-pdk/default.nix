@@ -13,6 +13,14 @@ let
     hash = "sha256-wmXGAUwXbz4TyeIRQZhnspIaNw0G3+tYdIrUIr8XAgw=";
   };
 
+  # Physical verification rule decks (DRC/LVS for KLayout)
+  fd_pv = fetchFromGitHub {
+    owner = "efabless";
+    repo = "globalfoundries-pdk-libs-gf180mcu_fd_pv";
+    rev = "05e7b6adf19edf942969c1c9625f02fd87874f06";
+    hash = "sha256-kVR4fk8PnzMGLCWYFR0fjzO+pA1yoWsqlm2Mc9NdKJ8=";
+  };
+
   # PVT corners to generate merged liberty files for
   corners = [
     "ff_125C_1v98"
@@ -75,6 +83,10 @@ stdenvNoCC.mkDerivation {
       mkdir -p $out/share/pdk/gf180mcu/models
       cp -r ${fd_sc_mcu7t5v0}/models/* $out/share/pdk/gf180mcu/models/
     fi
+
+    # Physical verification rule decks (DRC/LVS)
+    mkdir -p $out/share/pdk/gf180mcu/pv
+    cp -r ${fd_pv}/* $out/share/pdk/gf180mcu/pv/ 2>/dev/null || true
 
     runHook postInstall
   '';

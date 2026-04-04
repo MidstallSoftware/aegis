@@ -12,8 +12,7 @@
 }:
 
 let
-  tools = aegis-ip.tools;
-  deviceName = aegis-ip.deviceName;
+  inherit (aegis-ip) tools deviceName;
 in
 stdenvNoCC.mkDerivation {
   name = "aegis-logic-gates-${deviceName}";

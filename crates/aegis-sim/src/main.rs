@@ -48,7 +48,7 @@ fn main() {
 
     let desc_json = fs::read_to_string(&args.descriptor)
         .unwrap_or_else(|e| panic!("Failed to read descriptor: {e}"));
-    let desc: aegis_desc::AegisFpgaDeviceDescriptor = serde_json::from_str(&desc_json)
+    let desc: aegis_ip::AegisFpgaDeviceDescriptor = serde_json::from_str(&desc_json)
         .unwrap_or_else(|e| panic!("Failed to parse descriptor: {e}"));
 
     let bitstream =

@@ -73,14 +73,14 @@ lib.extendMkDerivation {
       buildPhase = ''
         runHook preBuild
 
-        # Find PDK files
-        LIB_FILE=$(find ${libsRef}/lib -name '*tt*' -name '*.lib' | head -1)
+        # Find PDK files (use -print -quit to avoid SIGPIPE)
+        LIB_FILE=$(find ${libsRef}/lib -name '*tt*' -name '*.lib' -print -quit)
         if [ -z "$LIB_FILE" ]; then
-          LIB_FILE=$(find ${libsRef}/lib -name '*.lib' | head -1)
+          LIB_FILE=$(find ${libsRef}/lib -name '*.lib' -print -quit)
         fi
         echo "Using liberty: $LIB_FILE"
 
-        TECH_LEF=$(find ${libsRef}/lef -name '*tech*.lef' | head -1)
+        TECH_LEF=$(find ${libsRef}/lef -name '*tech*.lef' -print -quit)
         echo "Using tech LEF: $TECH_LEF"
 
         # ================================================================
@@ -96,7 +96,7 @@ lib.extendMkDerivation {
         set DEVICE_NAME "${deviceName}"
         source ${aegis-ip}/${deviceName}-yosys.tcl
         YOSYS_EOF
-        yosys -c synth.tcl > yosys.log 2>&1
+        yosys -c synth.tcl 2>&1 | tee yosys.log
 
         # ================================================================
         # Stage 2: SDC constraints
@@ -128,7 +128,7 @@ lib.extendMkDerivation {
         ''}
         source ${aegis-ip}/${deviceName}-openroad.tcl
         OPENROAD_EOF
-        openroad -exit pnr.tcl > openroad.log 2>&1 || true
+        openroad -exit pnr.tcl 2>&1 | tee openroad.log
 
         # ================================================================
         # Stage 4: GDS generation via KLayout
@@ -136,7 +136,7 @@ lib.extendMkDerivation {
         echo "=== Stage 4: GDS generation ==="
 
         if [ -f "${deviceName}_final.def" ]; then
-          CELL_GDS=$(find ${libsRef}/gds -name '*.gds' | head -1)
+          CELL_GDS=$(find ${libsRef}/gds -name '*.gds' -print -quit)
 
           if [ -n "$CELL_GDS" ]; then
             CELL_GDS="$CELL_GDS" \

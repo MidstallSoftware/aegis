@@ -1,9 +1,18 @@
-use typify::import_types;
+/// Device descriptor types generated from the JSON Schema.
+pub mod desc {
+    use typify::import_types;
+    import_types!(schema = "../../ip/data/descriptor.schema.json");
+}
 
-import_types!(schema = "../../ip/data/descriptor.schema.json");
+pub use desc::*;
+
+#[allow(unused_imports)]
+pub use tile_bits::TileConfig;
+
+pub mod tile_bits;
 
 #[cfg(test)]
-mod tests {
+mod desc_tests {
     use std::num::NonZero;
 
     use super::*;
