@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Bitstream packer for Aegis FPGA devices"
 
 [dependencies]
-aegis-desc = { path = "../aegis-desc" }
+aegis-ip = { path = "../aegis-ip" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

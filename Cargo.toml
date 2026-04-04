@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aegis-desc", "crates/aegis-pack", "crates/aegis-sim"]
+members = ["crates/aegis-ip", "crates/aegis-pack", "crates/aegis-sim"]
 resolver = "2"
 
 [workspace.package]

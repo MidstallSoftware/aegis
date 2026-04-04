@@ -113,7 +113,7 @@ fn ff_disabled_holds_zero() {
 #[test]
 fn decode_empty_bitstream() {
     let bitstream = vec![0u8; 16];
-    let cfg = decode_tile_config(&bitstream, 0, 1);
+    let cfg = TileConfig::decode(&bitstream, 0, 1);
     assert_eq!(cfg.lut_init, 0);
     assert!(!cfg.ff_enable);
     assert!(!cfg.carry_mode);
@@ -124,7 +124,7 @@ fn decode_lut_init() {
     let mut bitstream = vec![0u8; 16];
     bitstream[0] = 0xAA;
     bitstream[1] = 0xAA;
-    let cfg = decode_tile_config(&bitstream, 0, 1);
+    let cfg = TileConfig::decode(&bitstream, 0, 1);
     assert_eq!(cfg.lut_init, 0xAAAA);
 }
 
@@ -132,7 +132,7 @@ fn decode_lut_init() {
 fn decode_ff_enable() {
     let mut bitstream = vec![0u8; 16];
     bitstream[2] = 0x01; // bit 16
-    let cfg = decode_tile_config(&bitstream, 0, 1);
+    let cfg = TileConfig::decode(&bitstream, 0, 1);
     assert!(cfg.ff_enable);
 }
 

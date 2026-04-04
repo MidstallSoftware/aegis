@@ -1,5 +1,6 @@
 import 'package:rohd/rohd.dart';
 import 'package:rohd_hcl/rohd_hcl.dart';
+import '../../config/tile_config.dart';
 import '../../types.dart';
 import 'bram_tile.dart';
 import 'clock_tile.dart';
@@ -193,7 +194,7 @@ class AegisFPGA extends Module {
         'width': width,
         'height': height,
         'tracks': tracks,
-        'tile_config_width': Tile.CONFIG_WIDTH,
+        'tile_config_width': tileConfigWidth(tracks),
         'bram': BramTile.descriptor(
           dataWidth: bramDataWidth,
           addrWidth: bramAddrWidth,
