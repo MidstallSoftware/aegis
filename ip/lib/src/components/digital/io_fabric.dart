@@ -16,10 +16,10 @@ class IOFabric extends Module {
   Logic get padOut => output('padOut');
   Logic get padOutputEnable => output('padOutputEnable');
 
-  Logic get serialIn => input('serialIn');
-  Logic get serialOut => output('serialOut');
-  Logic get txReady => output('txReady');
-  Logic get rxValid => output('rxValid');
+  Logic? get serialIn => serdesCount > 0 ? input('serialIn') : null;
+  Logic? get serialOut => serdesCount > 0 ? output('serialOut') : null;
+  Logic? get txReady => serdesCount > 0 ? output('txReady') : null;
+  Logic? get rxValid => serdesCount > 0 ? output('rxValid') : null;
 
   final int width;
   final int height;
@@ -61,10 +61,12 @@ class IOFabric extends Module {
     addOutput('padOut', width: pads);
     addOutput('padOutputEnable', width: pads);
 
-    serialIn = addInput('serialIn', serialIn, width: serdesCount);
-    addOutput('serialOut', width: serdesCount);
-    addOutput('txReady', width: serdesCount);
-    addOutput('rxValid', width: serdesCount);
+    if (serdesCount > 0) {
+      serialIn = addInput('serialIn', serialIn, width: serdesCount);
+      addOutput('serialOut', width: serdesCount);
+      addOutput('txReady', width: serdesCount);
+      addOutput('rxValid', width: serdesCount);
+    }
 
     // ---- IO tiles ----
     // Order: north (L-to-R), east (T-to-B), south (L-to-R), west (T-to-B)
@@ -137,33 +139,35 @@ class IOFabric extends Module {
       ));
     }
 
-    for (int i = 0; i < serdesCount; i++) {
-      serdesTiles[i].$2 <= serialIn[i];
-      serdesTiles[i].$5 <= cfgLoad;
-    }
+    if (serdesCount > 0) {
+      for (int i = 0; i < serdesCount; i++) {
+        serdesTiles[i].$2 <= serialIn![i];
+        serdesTiles[i].$5 <= cfgLoad;
+      }
 
-    // Collect serial outputs
-    serialOut <=
-        serdesTiles
-            .map((t) => t.$1.serialOut)
-            .toList()
-            .reversed
-            .toList()
-            .swizzle();
-    txReady <=
-        serdesTiles
-            .map((t) => t.$1.txReady)
-            .toList()
-            .reversed
-            .toList()
-            .swizzle();
-    rxValid <=
-        serdesTiles
-            .map((t) => t.$1.rxValid)
-            .toList()
-            .reversed
-            .toList()
-            .swizzle();
+      // Collect serial outputs
+      serialOut! <=
+          serdesTiles
+              .map((t) => t.$1.serialOut)
+              .toList()
+              .reversed
+              .toList()
+              .swizzle();
+      txReady! <=
+          serdesTiles
+              .map((t) => t.$1.txReady)
+              .toList()
+              .reversed
+              .toList()
+              .swizzle();
+      rxValid! <=
+          serdesTiles
+              .map((t) => t.$1.rxValid)
+              .toList()
+              .reversed
+              .toList()
+              .swizzle();
+    }
 
     // ---- Config chain: IO tiles -> SerDes tiles -> fabric ----
     ioTiles[0].$4 <= cfgIn;
@@ -171,12 +175,16 @@ class IOFabric extends Module {
       ioTiles[i].$4 <= ioTiles[i - 1].$1.cfgOut;
     }
 
-    serdesTiles[0].$4 <= ioTiles.last.$1.cfgOut;
-    for (int i = 1; i < serdesTiles.length; i++) {
-      serdesTiles[i].$4 <= serdesTiles[i - 1].$1.cfgOut;
+    Logic fabricCfgIn;
+    if (serdesTiles.isNotEmpty) {
+      serdesTiles[0].$4 <= ioTiles.last.$1.cfgOut;
+      for (int i = 1; i < serdesTiles.length; i++) {
+        serdesTiles[i].$4 <= serdesTiles[i - 1].$1.cfgOut;
+      }
+      fabricCfgIn = serdesTiles.last.$1.cfgOut;
+    } else {
+      fabricCfgIn = ioTiles.last.$1.cfgOut;
     }
-
-    final fabricCfgIn = serdesTiles.last.$1.cfgOut;
 
     // Collect pad outputs
     padOut <=

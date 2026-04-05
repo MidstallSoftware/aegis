@@ -1,14 +1,29 @@
-/// Emits an OpenROAD TCL script for place-and-route.
+import '../yosys/tcl_emitter.dart';
+
+/// Emits an OpenROAD TCL script for top-level macro-based place-and-route.
+///
+/// Tile modules are pre-hardened as macros (with LEF abstracts).
+/// This script places them in a grid and routes the inter-tile wiring
+/// on upper metal layers.
 class OpenroadTclEmitter {
   final String moduleName;
   final int width;
   final int height;
   final int serdesCount;
   final int clockTileCount;
+  final int bramColumnInterval;
+  final int dspColumnInterval;
   final bool hasConfigClk;
 
-  /// Total I/O pads: 2*width + 2*height.
   int get totalPads => 2 * width + 2 * height;
+
+  /// Spacing between tile macros (um). Must be large enough for
+  /// clock buffer and standard cell placement in routing channels.
+  final double macroHaloUm;
+
+  /// Margin around the macro grid edge (um). Room for IO pins
+  /// and glue logic placement.
+  final double gridMarginUm;
 
   const OpenroadTclEmitter({
     required this.moduleName,
@@ -16,10 +31,13 @@ class OpenroadTclEmitter {
     required this.height,
     required this.serdesCount,
     required this.clockTileCount,
+    this.bramColumnInterval = 0,
+    this.dspColumnInterval = 0,
     this.hasConfigClk = false,
+    this.macroHaloUm = 100,
+    this.gridMarginUm = 200,
   });
 
-  /// Generates the complete OpenROAD TCL script.
   String generate() {
     final buf = StringBuffer();
 
@@ -44,29 +62,55 @@ class OpenroadTclEmitter {
       '$clockTileCount clock tiles',
     );
     buf.writeln('#');
-    buf.writeln('# Shell variables are substituted at build time.');
+    buf.writeln('# Macro-based hierarchical flow:');
+    buf.writeln('# - Tile types are pre-hardened macros (LEF abstracts)');
+    buf.writeln('# - Top level places macros and routes inter-tile wiring');
+    buf.writeln('#');
+    buf.writeln('# Shell variables substituted at build time.');
+    buf.writeln();
+    // Helper: discover routing layers from loaded tech LEF
+    buf.writeln('# Discover routing layers from the PDK tech LEF');
+    buf.writeln('proc get_routing_layers {} {');
+    buf.writeln('    set layers {}');
+    buf.writeln('    set tech [[ord::get_db] getTech]');
+    buf.writeln('    foreach layer [\$tech getLayers] {');
+    buf.writeln('        if {[\$layer getType] eq "ROUTING"} {');
+    buf.writeln('            lappend layers [\$layer getName]');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('    return \$layers');
+    buf.writeln('}');
     buf.writeln();
   }
 
   void _writeReadInputs(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Read inputs');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
+    buf.writeln(_section('Read inputs'));
+
     buf.writeln('read_liberty \$LIB_FILE');
     buf.writeln('read_lef \$TECH_LEF');
     buf.writeln();
-    buf.writeln('# Read cell LEFs');
+
+    // Read standard cell LEFs
+    buf.writeln('# Read standard cell LEFs');
     buf.writeln('foreach lef [glob -directory \$CELL_LEF_DIR *.lef] {');
     buf.writeln('    if {![string match "*tech*" \$lef]} {');
     buf.writeln('        read_lef \$lef');
     buf.writeln('    }');
     buf.writeln('}');
     buf.writeln();
+
+    // Read tile macro LEFs and liberty timing models
+    buf.writeln('# Read tile macro LEF abstracts and timing models');
+    for (final mod in YosysTclEmitter.tileModules) {
+      buf.writeln('if {[file exists \${DEVICE_NAME}_${mod}.lef]} {');
+      buf.writeln('    read_lef \${DEVICE_NAME}_${mod}.lef');
+      buf.writeln('}');
+      buf.writeln('if {[file exists \${DEVICE_NAME}_${mod}.lib]} {');
+      buf.writeln('    read_liberty \${DEVICE_NAME}_${mod}.lib');
+      buf.writeln('}');
+    }
+    buf.writeln();
+
     buf.writeln('read_verilog \$SYNTH_V');
     buf.writeln('link_design $moduleName');
     buf.writeln('read_sdc \$SDC_FILE');
@@ -74,31 +118,88 @@ class OpenroadTclEmitter {
   }
 
   void _writeFloorplan(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Floorplan');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
+    buf.writeln(_section('Floorplan'));
+
+    // Compute die area from macro sizes if available
+    buf.writeln('# Determine die area: use explicit setting, or compute from');
+    buf.writeln('# tile macro dimensions × grid size');
     buf.writeln('if {[info exists DIE_AREA]} {');
     buf.writeln('    initialize_floorplan \\');
     buf.writeln('        -die_area \$DIE_AREA \\');
-    buf.writeln('        -core_space 2 \\');
+    buf.writeln(
+      '        -core_area "[expr {[lindex \$DIE_AREA 0] + 1}] [expr {[lindex \$DIE_AREA 1] + 1}] [expr {[lindex \$DIE_AREA 2] - 1}] [expr {[lindex \$DIE_AREA 3] - 1}]" \\',
+    );
     buf.writeln('        -site \$SITE_NAME');
     buf.writeln('} else {');
-    buf.writeln('    initialize_floorplan \\');
-    buf.writeln('        -utilization \$UTILIZATION \\');
-    buf.writeln('        -core_space 2 \\');
-    buf.writeln('        -site \$SITE_NAME');
+    buf.writeln('    # Find largest macro to size the die');
+    buf.writeln('    set tw 0');
+    buf.writeln('    set th 0');
+    buf.writeln('    foreach inst [[ord::get_db_block] getInsts] {');
+    buf.writeln('        if {[[\$inst getMaster] isBlock]} {');
+    buf.writeln(
+      '            set mw [ord::dbu_to_microns [[\$inst getMaster] getWidth]]',
+    );
+    buf.writeln(
+      '            set mh [ord::dbu_to_microns [[\$inst getMaster] getHeight]]',
+    );
+    buf.writeln('            if {\$mw > \$tw} { set tw \$mw }');
+    buf.writeln('            if {\$mh > \$th} { set th \$mh }');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('    if {\$tw > 0} {');
+    buf.writeln('        # Count total macro instances to size the die');
+    buf.writeln('        set macro_n 0');
+    buf.writeln('        foreach inst [[ord::get_db_block] getInsts] {');
+    buf.writeln(
+      '            if {[[\$inst getMaster] isBlock]} { incr macro_n }',
+    );
+    buf.writeln('        }');
+    buf.writeln('        # Compute grid dimensions from macro count');
+    buf.writeln(
+      '        set grid_cols [expr {int(sqrt(\$macro_n * \$tw / \$th)) + 1}]',
+    );
+    buf.writeln(
+      '        set grid_rows [expr {(\$macro_n + \$grid_cols - 1) / \$grid_cols}]',
+    );
+    buf.writeln(
+      '        puts "Die grid: \$grid_cols cols x \$grid_rows rows for \$macro_n macros"',
+    );
+    buf.writeln('        set mfg 0.005');
+    buf.writeln(
+      '        if {![info exists MACRO_HALO]} { set MACRO_HALO $macroHaloUm }',
+    );
+    buf.writeln(
+      '        if {![info exists GRID_MARGIN]} { set GRID_MARGIN $gridMarginUm }',
+    );
+    buf.writeln(
+      '        set die_w [expr {int(((\$tw + \$MACRO_HALO) * \$grid_cols + 2 * \$GRID_MARGIN) / \$mfg) * \$mfg}]',
+    );
+    buf.writeln(
+      '        set die_h [expr {int(((\$th + \$MACRO_HALO) * \$grid_rows + 2 * \$GRID_MARGIN) / \$mfg) * \$mfg}]',
+    );
+    buf.writeln(
+      '        puts "Computed die area: \${die_w}um x \${die_h}um '
+      '(tile: \${tw}um x \${th}um)"',
+    );
+    buf.writeln('        set margin \$GRID_MARGIN');
+    buf.writeln('        initialize_floorplan \\');
+    buf.writeln('            -die_area "0 0 \$die_w \$die_h" \\');
+    buf.writeln(
+      '            -core_area "\$margin \$margin '
+      '[expr {\$die_w - \$margin}] [expr {\$die_h - \$margin}]" \\',
+    );
+    buf.writeln('            -site \$SITE_NAME');
+    buf.writeln('    } else {');
+    buf.writeln('        # Fallback: utilization-based');
+    buf.writeln('        initialize_floorplan \\');
+    buf.writeln('            -utilization \$UTILIZATION \\');
+    buf.writeln('            -core_space 2 \\');
+    buf.writeln('            -site \$SITE_NAME');
+    buf.writeln('    }');
     buf.writeln('}');
     buf.writeln();
 
-    // Generate routing tracks - pitches are read from tech LEF layer defs
-    buf.writeln('# Generate routing tracks');
-    buf.writeln('# Pitches should match the tech LEF layer definitions');
-    buf.writeln('foreach layer {Metal1 Metal2 Metal3 Metal4 Metal5 Metal6} {');
+    buf.writeln('foreach layer [get_routing_layers] {');
     buf.writeln(
       '    if {![catch {set tech_layer '
       '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
@@ -124,32 +225,16 @@ class OpenroadTclEmitter {
   }
 
   void _writePinPlacement(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Pin placement');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
+    buf.writeln(_section('Pin placement'));
 
-    // Group pins by function and edge:
-    // - North: pad I/O for the north edge of the FPGA fabric
-    // - South: pad I/O for the south edge
-    // - East: SerDes pins
-    // - West: clock, reset, config
-
-    // Clock and control pins on west edge
     final westPins = <String>['clk', 'reset', 'configDone'];
     if (hasConfigClk) westPins.add('configClk');
-    // Config read port
     westPins.addAll([
       'configRead_en',
       'configRead_addr\\[*\\]',
       'configRead_data\\[*\\]',
     ]);
 
-    // SerDes pins on east edge
     final eastPins = <String>[];
     if (serdesCount > 0) {
       eastPins.addAll([
@@ -159,49 +244,429 @@ class OpenroadTclEmitter {
         'rxValid\\[*\\]',
       ]);
     }
-
-    // Clock outputs on east edge too
     if (clockTileCount > 0) {
       eastPins.addAll(['clkOut\\[*\\]', 'clkLocked\\[*\\]']);
     }
 
-    // Pad I/O split between north and south
-    final northSouthPins = [
-      'padIn\\[*\\]',
-      'padOut\\[*\\]',
-      'padOutputEnable\\[*\\]',
-    ];
+    _writeLayerDetection(buf);
+    buf.writeln('place_pins -hor_layers \$hor_layer -ver_layers \$ver_layer');
+    buf.writeln();
+  }
 
-    buf.writeln('# West edge: clock, reset, config');
-    buf.writeln('set west_pins [list \\');
-    for (final pin in westPins) {
-      buf.writeln('    $pin \\');
-    }
-    buf.writeln(']');
+  void _writePowerGrid(StringBuffer buf) {
+    buf.writeln(_section('Power grid'));
+
+    buf.writeln('add_global_connection -net VDD -pin_pattern VDD -power');
+    buf.writeln('add_global_connection -net VSS -pin_pattern VSS -ground');
+    buf.writeln('global_connect');
+    buf.writeln();
+  }
+
+  void _writePlacement(StringBuffer buf) {
+    buf.writeln(_section('Placement'));
+
+    // Count and report unplaced macros
+    buf.writeln('# Detect macros');
+    buf.writeln('set macro_count 0');
+    buf.writeln('foreach inst [[ord::get_db_block] getInsts] {');
+    buf.writeln('    if {[[\$inst getMaster] isBlock]} {');
+    buf.writeln('        incr macro_count');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln('puts "Detected \$macro_count macro instances"');
     buf.writeln();
 
-    buf.writeln('# East edge: SerDes, clock outputs');
-    buf.writeln('set east_pins [list \\');
-    for (final pin in eastPins) {
-      buf.writeln('    $pin \\');
-    }
-    buf.writeln(']');
+    buf.writeln('if {\$macro_count > 0} {');
+    buf.writeln(
+      '    if {![info exists MACRO_HALO]} { set MACRO_HALO $macroHaloUm }',
+    );
+    buf.writeln(
+      '    if {![info exists GRID_MARGIN]} { set GRID_MARGIN $gridMarginUm }',
+    );
+    buf.writeln('    set halo \$MACRO_HALO');
+    buf.writeln('    set margin \$GRID_MARGIN');
     buf.writeln();
 
-    buf.writeln('# North/South edges: pad I/O');
-    buf.writeln('set ns_pins [list \\');
-    for (final pin in northSouthPins) {
-      buf.writeln('    $pin \\');
-    }
-    buf.writeln(']');
+    // Group macros by master name
+    buf.writeln('    # Group macros by type');
+    buf.writeln('    array set macro_groups {}');
+    buf.writeln('    foreach inst [[ord::get_db_block] getInsts] {');
+    buf.writeln('        if {[[\$inst getMaster] isBlock]} {');
+    buf.writeln('            set mname [[\$inst getMaster] getName]');
+    buf.writeln('            lappend macro_groups(\$mname) \$inst');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln();
+    buf.writeln('    foreach type [array names macro_groups] {');
+    buf.writeln('        set n [llength \$macro_groups(\$type)]');
+    buf.writeln('        set m [[lindex \$macro_groups(\$type) 0] getMaster]');
+    buf.writeln('        set w [ord::dbu_to_microns [\$m getWidth]]');
+    buf.writeln('        set h [ord::dbu_to_microns [\$m getHeight]]');
+    buf.writeln('        puts "  \$type: \$n instances (\${w}um x \${h}um)"');
+    buf.writeln('    }');
     buf.writeln();
 
-    // Use place_pins with pin groups for edge assignment
-    // Find available routing layers
-    buf.writeln('# Find routing layers for pin placement');
+    // Get die dimensions
+    buf.writeln('    set die_rect [[ord::get_db_block] getDieArea]');
+    buf.writeln('    set die_w [ord::dbu_to_microns [\$die_rect xMax]]');
+    buf.writeln('    set die_h [ord::dbu_to_microns [\$die_rect yMax]]');
+    buf.writeln();
+
+    // Place fabric tiles (Tile, BramTile, DspBasicTile) in main grid
+    // Each type uses its own height, packed into columns
+    buf.writeln('    # Place fabric tiles in a grid');
+    buf.writeln('    # Get Tile dimensions for the main grid pitch');
+    buf.writeln('    set tile_w 0');
+    buf.writeln('    set tile_h 0');
+    buf.writeln('    if {[info exists macro_groups(Tile)]} {');
+    buf.writeln(
+      '        set tile_w [ord::dbu_to_microns [[[lindex \$macro_groups(Tile) 0] getMaster] getWidth]]',
+    );
+    buf.writeln(
+      '        set tile_h [ord::dbu_to_microns [[[lindex \$macro_groups(Tile) 0] getMaster] getHeight]]',
+    );
+    buf.writeln('    }');
+    buf.writeln('    set tile_px [expr {\$tile_w + \$halo}]');
+    buf.writeln('    set tile_py [expr {\$tile_h + \$halo}]');
+    buf.writeln();
+
+    // Compute fabric grid columns from die width
+    // Reserve right edge for non-fabric macros (Clock, SerDes, etc.)
+    buf.writeln('    set edge_reserve 250');
+    buf.writeln(
+      '    set fabric_w [expr {\$die_w - 2 * \$margin - \$edge_reserve}]',
+    );
+    buf.writeln('    set fabric_cols [expr {int(\$fabric_w / \$tile_px)}]');
+    buf.writeln('    if {\$fabric_cols < 1} { set fabric_cols 1 }');
+    buf.writeln();
+
+    // Place Tile, BramTile, DspBasicTile in fabric grid
+    buf.writeln('    set cur_x \$margin');
+    buf.writeln('    set cur_y \$margin');
+    buf.writeln('    set col 0');
+    buf.writeln('    set placed 0');
+    buf.writeln();
+
+    // Place fabric tiles column by column, matching the FPGA fabric layout.
+    // BRAM columns at bramColumnInterval, DSP at dspColumnInterval,
+    // remaining columns are LUT tiles. Each column type uses its own width.
+    buf.writeln(
+      '    # Build column-major placement matching FPGA fabric layout',
+    );
+    buf.writeln('    # Queues for each tile type');
+    buf.writeln(
+      '    set tile_q [expr {[info exists macro_groups(Tile)] ? \$macro_groups(Tile) : {}}]',
+    );
+    buf.writeln(
+      '    set bram_q [expr {[info exists macro_groups(BramTile)] ? \$macro_groups(BramTile) : {}}]',
+    );
+    buf.writeln(
+      '    set dsp_q [expr {[info exists macro_groups(DspBasicTile)] ? \$macro_groups(DspBasicTile) : {}}]',
+    );
+    buf.writeln();
+    buf.writeln('    # Compute column types and x positions');
+    buf.writeln('    set cur_x \$margin');
+    buf.writeln('    set fabric_height ${height}');
+    buf.writeln('    set col_x_list {}');
+    buf.writeln('    set col_type_list {}');
+    buf.writeln('    for {set c 0} {\$c < ${width}} {incr c} {');
+
+    // Determine column type using same logic as Dart fabric
+    buf.writeln('        set ctype "Tile"');
+    if (bramColumnInterval > 0) {
+      buf.writeln(
+        '        if {$bramColumnInterval > 0 && '
+        '(\$c - $bramColumnInterval) >= 0 && '
+        '((\$c - $bramColumnInterval) % ($bramColumnInterval + 1)) == 0} {',
+      );
+      buf.writeln('            set ctype "BramTile"');
+      buf.writeln('        }');
+    }
+    if (dspColumnInterval > 0) {
+      buf.writeln(
+        '        if {\$ctype eq "Tile" && $dspColumnInterval > 0 && '
+        '(\$c - $dspColumnInterval) >= 0 && '
+        '((\$c - $dspColumnInterval) % ($dspColumnInterval + 1)) == 0} {',
+      );
+      buf.writeln('            set ctype "DspBasicTile"');
+      buf.writeln('        }');
+    }
+
+    buf.writeln('        lappend col_type_list \$ctype');
+    buf.writeln('        lappend col_x_list \$cur_x');
+    buf.writeln();
+    buf.writeln('        # Advance x by this column type\'s width');
+    buf.writeln('        switch \$ctype {');
+    buf.writeln('            Tile { set cw \$tile_w }');
+    buf.writeln('            BramTile {');
+    buf.writeln('                if {[llength \$bram_q] > 0} {');
+    buf.writeln(
+      '                    set cw [ord::dbu_to_microns [[[lindex \$bram_q 0] getMaster] getWidth]]',
+    );
+    buf.writeln('                } else { set cw \$tile_w }');
+    buf.writeln('            }');
+    buf.writeln('            DspBasicTile {');
+    buf.writeln('                if {[llength \$dsp_q] > 0} {');
+    buf.writeln(
+      '                    set cw [ord::dbu_to_microns [[[lindex \$dsp_q 0] getMaster] getWidth]]',
+    );
+    buf.writeln('                } else { set cw \$tile_w }');
+    buf.writeln('            }');
+    buf.writeln('        }');
+    buf.writeln('        set cur_x [expr {\$cur_x + \$cw + \$halo}]');
+    buf.writeln('    }');
+    buf.writeln();
+
+    // Now place tiles column by column, row by row
+    buf.writeln('    # Place tiles in fabric grid');
+    buf.writeln('    set placed 0');
+    buf.writeln('    for {set c 0} {\$c < ${width}} {incr c} {');
+    buf.writeln('        set ctype [lindex \$col_type_list \$c]');
+    buf.writeln('        set cx [lindex \$col_x_list \$c]');
+    buf.writeln('        for {set r 0} {\$r < \$fabric_height} {incr r} {');
+    buf.writeln('            set cy [expr {\$margin + \$r * \$tile_py}]');
+    buf.writeln('            switch \$ctype {');
+    buf.writeln('                Tile {');
+    buf.writeln('                    if {[llength \$tile_q] > 0} {');
+    buf.writeln('                        set inst [lindex \$tile_q 0]');
+    buf.writeln('                        set tile_q [lrange \$tile_q 1 end]');
+    buf.writeln(
+      '                        \$inst setLocation [ord::microns_to_dbu \$cx] [ord::microns_to_dbu \$cy]',
+    );
+    buf.writeln('                        \$inst setPlacementStatus FIRM');
+    buf.writeln('                        incr placed');
+    buf.writeln('                    }');
+    buf.writeln('                }');
+    buf.writeln('                BramTile {');
+    buf.writeln('                    if {[llength \$bram_q] > 0} {');
+    buf.writeln('                        set inst [lindex \$bram_q 0]');
+    buf.writeln('                        set bram_q [lrange \$bram_q 1 end]');
+    buf.writeln(
+      '                        \$inst setLocation [ord::microns_to_dbu \$cx] [ord::microns_to_dbu \$cy]',
+    );
+    buf.writeln('                        \$inst setPlacementStatus FIRM');
+    buf.writeln('                        incr placed');
+    buf.writeln('                    }');
+    buf.writeln('                }');
+    buf.writeln('                DspBasicTile {');
+    buf.writeln('                    if {[llength \$dsp_q] > 0} {');
+    buf.writeln('                        set inst [lindex \$dsp_q 0]');
+    buf.writeln('                        set dsp_q [lrange \$dsp_q 1 end]');
+    buf.writeln(
+      '                        \$inst setLocation [ord::microns_to_dbu \$cx] [ord::microns_to_dbu \$cy]',
+    );
+    buf.writeln('                        \$inst setPlacementStatus FIRM');
+    buf.writeln('                        incr placed');
+    buf.writeln('                    }');
+    buf.writeln('                }');
+    buf.writeln('            }');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln(
+      '    set fabric_top [expr {\$margin + \$fabric_height * \$tile_py}]',
+    );
+    buf.writeln(
+      '    puts "Placed \$placed fabric tiles in ${width} cols x \$fabric_height rows"',
+    );
+    buf.writeln();
+
+    // Place IO tiles along the edges of the fabric grid
+    buf.writeln('    # Place IO tiles along fabric perimeter');
+    buf.writeln('    if {[info exists macro_groups(IOTile)]} {');
+    buf.writeln(
+      '        set io_h [ord::dbu_to_microns [[[lindex \$macro_groups(IOTile) 0] getMaster] getHeight]]',
+    );
+    buf.writeln(
+      '        set io_w [ord::dbu_to_microns [[[lindex \$macro_groups(IOTile) 0] getMaster] getWidth]]',
+    );
+    buf.writeln('        set io_px [expr {\$io_w + \$halo}]');
+    buf.writeln('        set io_idx 0');
+    buf.writeln('        set io_count [llength \$macro_groups(IOTile)]');
+    buf.writeln('        # Place along bottom edge');
+    buf.writeln('        set io_y [expr {\$margin - \$io_h - \$halo}]');
+    buf.writeln('        if {\$io_y < 0} { set io_y 0 }');
+    buf.writeln(
+      '        for {set i 0} {\$i < \$fabric_cols && \$io_idx < \$io_count} {incr i} {',
+    );
+    buf.writeln('            set io_x [expr {\$margin + \$i * \$tile_px}]');
+    buf.writeln(
+      '            [lindex \$macro_groups(IOTile) \$io_idx] setLocation [ord::microns_to_dbu \$io_x] [ord::microns_to_dbu \$io_y]',
+    );
+    buf.writeln(
+      '            [lindex \$macro_groups(IOTile) \$io_idx] setPlacementStatus FIRM',
+    );
+    buf.writeln('            incr io_idx');
+    buf.writeln('        }');
+    buf.writeln('        # Place along top edge');
+    buf.writeln('        set io_y \$fabric_top');
+    buf.writeln(
+      '        for {set i 0} {\$i < \$fabric_cols && \$io_idx < \$io_count} {incr i} {',
+    );
+    buf.writeln('            set io_x [expr {\$margin + \$i * \$tile_px}]');
+    buf.writeln(
+      '            [lindex \$macro_groups(IOTile) \$io_idx] setLocation [ord::microns_to_dbu \$io_x] [ord::microns_to_dbu \$io_y]',
+    );
+    buf.writeln(
+      '            [lindex \$macro_groups(IOTile) \$io_idx] setPlacementStatus FIRM',
+    );
+    buf.writeln('            incr io_idx');
+    buf.writeln('        }');
+    buf.writeln('        # Place remaining IO tiles along right edge');
+    buf.writeln(
+      '        set io_x [expr {\$margin + \$fabric_cols * \$tile_px}]',
+    );
+    buf.writeln('        set io_row 0');
+    buf.writeln('        while {\$io_idx < \$io_count} {');
+    buf.writeln(
+      '            set io_y [expr {\$margin + \$io_row * (\$io_h + \$halo)}]',
+    );
+    buf.writeln(
+      '            [lindex \$macro_groups(IOTile) \$io_idx] setLocation [ord::microns_to_dbu \$io_x] [ord::microns_to_dbu \$io_y]',
+    );
+    buf.writeln(
+      '            [lindex \$macro_groups(IOTile) \$io_idx] setPlacementStatus FIRM',
+    );
+    buf.writeln('            incr io_idx');
+    buf.writeln('            incr io_row');
+    buf.writeln('        }');
+    buf.writeln('        puts "Placed \$io_count IO tiles around perimeter"');
+    buf.writeln('    }');
+    buf.writeln();
+
+    // Place edge macros (Clock, SerDes, FabricConfigLoader) along right edge
+    // Place SerDes above the fabric grid
+    buf.writeln('    # Place SerDes tiles above the fabric grid');
+    buf.writeln('    if {[info exists macro_groups(SerDesTile)]} {');
+    buf.writeln('        set serdes_x \$margin');
+    buf.writeln('        set serdes_y [expr {\$fabric_top + \$halo}]');
+    buf.writeln('        foreach inst \$macro_groups(SerDesTile) {');
+    buf.writeln(
+      '            set mw [ord::dbu_to_microns [[\$inst getMaster] getWidth]]',
+    );
+    buf.writeln(
+      '            set mh [ord::dbu_to_microns [[\$inst getMaster] getHeight]]',
+    );
+    buf.writeln(
+      '            \$inst setLocation [ord::microns_to_dbu \$serdes_x] [ord::microns_to_dbu \$serdes_y]',
+    );
+    buf.writeln('            \$inst setPlacementStatus FIRM');
+    buf.writeln(
+      '            puts "Placed SerDesTile at \${serdes_x}um x \${serdes_y}um"',
+    );
+    buf.writeln('            set serdes_x [expr {\$serdes_x + \$mw + \$halo}]');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln();
+
+    // Place Clock and ConfigLoader on the right edge
+    buf.writeln('    # Place Clock and ConfigLoader on right edge');
+    buf.writeln('    set edge_x [expr {\$die_w - \$margin}]');
+    buf.writeln('    set edge_y \$margin');
+    buf.writeln('    foreach type {ClockTile FabricConfigLoader} {');
+    buf.writeln('        if {[info exists macro_groups(\$type)]} {');
+    buf.writeln('            foreach inst \$macro_groups(\$type) {');
+    buf.writeln(
+      '                set mw [ord::dbu_to_microns [[\$inst getMaster] getWidth]]',
+    );
+    buf.writeln(
+      '                set mh [ord::dbu_to_microns [[\$inst getMaster] getHeight]]',
+    );
+    buf.writeln('                set x [expr {\$edge_x - \$mw}]');
+    buf.writeln(
+      '                \$inst setLocation [ord::microns_to_dbu \$x] [ord::microns_to_dbu \$edge_y]',
+    );
+    buf.writeln('                \$inst setPlacementStatus FIRM');
+    buf.writeln('                set edge_y [expr {\$edge_y + \$mh + \$halo}]');
+    buf.writeln(
+      '                puts "Placed \$type at \${x}um x [expr {\$edge_y - \$mh - \$halo}]um"',
+    );
+    buf.writeln('            }');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln();
+
+    buf.writeln('    # Cut standard cell rows around placed macros');
+    buf.writeln('    cut_rows');
+    buf.writeln('}');
+    buf.writeln();
+
+    // Then place remaining standard cells (glue logic)
+    buf.writeln('# Place remaining standard cells');
+    buf.writeln('global_placement -density \$UTILIZATION');
+    buf.writeln('detailed_placement');
+    buf.writeln();
+  }
+
+  void _writeCts(StringBuffer buf) {
+    buf.writeln(_section('Clock tree synthesis'));
+
+    buf.writeln('estimate_parasitics -placement');
+    buf.writeln();
+    buf.writeln('set cts_bufs {}');
+    buf.writeln('foreach sz {2 4 8 16} {');
+    buf.writeln('    set cell_name \${CELL_LIB}__clkbuf_\$sz');
+    buf.writeln('    lappend cts_bufs \$cell_name');
+    buf.writeln('}');
+    buf.writeln('clock_tree_synthesis -buf_list \$cts_bufs');
+    buf.writeln();
+    buf.writeln('detailed_placement');
+    buf.writeln();
+  }
+
+  void _writeRouting(StringBuffer buf) {
+    buf.writeln(_section('Routing'));
+
+    // Use upper metal layers for top-level routing
+    // Metal1-Metal2 may be used internally by tile macros
+    // Auto-detect the highest available routing layer
+    buf.writeln('set top_route ""');
+    buf.writeln('foreach layer [lreverse [get_routing_layers]] {');
+    buf.writeln(
+      '    if {![catch {set tl '
+      '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
+    );
+    buf.writeln('        if {\$tl ne "NULL" && \$top_route eq ""} {');
+    buf.writeln('            set top_route \$layer');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln('if {\$top_route eq ""} { set top_route Metal2 }');
+    buf.writeln('puts "Routing layers: Metal1-\$top_route"');
+    buf.writeln('set_routing_layers -signal Metal1-\$top_route');
+    buf.writeln('global_route -allow_congestion');
+    buf.writeln();
+    buf.writeln('# Save global-routed DEF (guaranteed output)');
+    buf.writeln('write_def \${DEVICE_NAME}_grouted.def');
+    buf.writeln();
+    buf.writeln(
+      '# Detailed route may fail on offgrid pin shapes from place_pins.',
+    );
+    buf.writeln('# If it fails, we still have the global-routed DEF.');
+    buf.writeln('detailed_route');
+    buf.writeln();
+  }
+
+  void _writeReports(StringBuffer buf) {
+    buf.writeln(_section('Reports'));
+
+    buf.writeln('report_checks -path_delay min_max > timing.rpt');
+    buf.writeln('report_design_area > area.rpt');
+    buf.writeln('report_power > power.rpt');
+    buf.writeln();
+  }
+
+  void _writeOutputs(StringBuffer buf) {
+    buf.writeln(_section('Write outputs'));
+
+    buf.writeln('write_def \${DEVICE_NAME}_final.def');
+    buf.writeln('write_verilog \${DEVICE_NAME}_final.v');
+    buf.writeln();
+  }
+
+  void _writeLayerDetection(StringBuffer buf) {
     buf.writeln('set hor_layer ""');
     buf.writeln('set ver_layer ""');
-    buf.writeln('foreach layer {Metal2 Metal3 Metal4} {');
+    buf.writeln('foreach layer [get_routing_layers] {');
     buf.writeln(
       '    if {![catch {set tl '
       '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
@@ -219,109 +684,12 @@ class OpenroadTclEmitter {
     buf.writeln('        }');
     buf.writeln('    }');
     buf.writeln('}');
-    buf.writeln();
     buf.writeln('if {\$hor_layer eq ""} { set hor_layer Metal1 }');
     buf.writeln('if {\$ver_layer eq ""} { set ver_layer Metal2 }');
-    buf.writeln();
-    buf.writeln('place_pins -hor_layers \$hor_layer -ver_layers \$ver_layer');
-    buf.writeln();
   }
 
-  void _writePowerGrid(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Power/ground connections');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
-    buf.writeln('add_global_connection -net VDD -pin_pattern VDD -power');
-    buf.writeln('add_global_connection -net VSS -pin_pattern VSS -ground');
-    buf.writeln('global_connect');
-    buf.writeln();
-  }
-
-  void _writePlacement(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Placement');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
-    buf.writeln('global_placement -density \$UTILIZATION');
-    buf.writeln('detailed_placement');
-    buf.writeln();
-  }
-
-  void _writeCts(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Clock tree synthesis');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
-    buf.writeln('estimate_parasitics -placement');
-    buf.writeln();
-    buf.writeln('# Use larger clock buffers for routable CTS');
-    buf.writeln('set cts_bufs {}');
-    buf.writeln('foreach sz {2 4 8 16} {');
-    buf.writeln('    set cell_name \${CELL_LIB}__clkbuf_\$sz');
-    buf.writeln('    lappend cts_bufs \$cell_name');
-    buf.writeln('}');
-    buf.writeln('clock_tree_synthesis -buf_list \$cts_bufs');
-    buf.writeln();
-    buf.writeln('# Post-CTS legalization');
-    buf.writeln('detailed_placement');
-    buf.writeln();
-  }
-
-  void _writeRouting(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Routing');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
-    buf.writeln('set_routing_layers -signal Metal1-Metal4');
-    buf.writeln('global_route -allow_congestion');
-    buf.writeln('detailed_route');
-    buf.writeln();
-  }
-
-  void _writeReports(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Reports');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
-    buf.writeln('report_checks -path_delay min_max > timing.rpt');
-    buf.writeln('report_design_area > area.rpt');
-    buf.writeln('report_power > power.rpt');
-    buf.writeln();
-  }
-
-  void _writeOutputs(StringBuffer buf) {
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln('# Write outputs');
-    buf.writeln(
-      '# ================================================================',
-    );
-    buf.writeln();
-    buf.writeln('write_def \${DEVICE_NAME}_final.def');
-    buf.writeln('write_verilog \${DEVICE_NAME}_final.v');
-    buf.writeln();
-    buf.writeln();
-  }
+  String _section(String title) =>
+      '# ================================================================\n'
+      '# $title\n'
+      '# ================================================================\n';
 }

@@ -96,6 +96,10 @@ stdenvNoCC.mkDerivation {
     siteName = "GF018hv5v_mcu_sc7";
     pdkName = "gf180mcu";
     pdkPath = "share/pdk/gf180mcu";
+    commentLayer = {
+      layer = 236;
+      datatype = 0;
+    };
   };
 
   meta = {

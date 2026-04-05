@@ -1,0 +1,187 @@
+/// Emits an OpenROAD TCL script to PnR a single tile type as a hard macro.
+///
+/// The resulting macro has deterministic pin positions on all 4 edges
+/// so adjacent tiles connect correctly when placed in a grid.
+class OpenroadTileTclEmitter {
+  final String deviceName;
+  final int tracks;
+
+  const OpenroadTileTclEmitter({
+    required this.deviceName,
+    required this.tracks,
+  });
+
+  /// Generate a PnR script for a single tile module.
+  String generateTilePnr(String tileModule) {
+    final buf = StringBuffer();
+
+    buf.writeln('# OpenROAD PnR script for $tileModule macro');
+    buf.writeln('# Auto-generated - produces a hard macro for tile-based PnR');
+    buf.writeln();
+
+    // Helper: discover routing layers from the PDK tech LEF
+    buf.writeln('proc get_routing_layers {} {');
+    buf.writeln('    set layers {}');
+    buf.writeln('    set tech [[ord::get_db] getTech]');
+    buf.writeln('    foreach layer [\$tech getLayers] {');
+    buf.writeln('        if {[\$layer getType] eq "ROUTING"} {');
+    buf.writeln('            lappend layers [\$layer getName]');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('    return \$layers');
+    buf.writeln('}');
+    buf.writeln();
+
+    // Read inputs
+    buf.writeln('read_liberty \$LIB_FILE');
+    buf.writeln('read_lef \$TECH_LEF');
+    buf.writeln();
+    buf.writeln('foreach lef [glob -directory \$CELL_LEF_DIR *.lef] {');
+    buf.writeln('    if {![string match "*tech*" \$lef]} {');
+    buf.writeln('        read_lef \$lef');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln();
+    buf.writeln('read_verilog \${DEVICE_NAME}_${tileModule}_synth.v');
+    buf.writeln('link_design $tileModule');
+    buf.writeln();
+
+    buf.writeln('create_clock [get_ports clk] -name clk -period \$CLK_PERIOD');
+    buf.writeln();
+
+    buf.writeln('if {[info exists TILE_DIE_W] && [info exists TILE_DIE_H]} {');
+    buf.writeln('    initialize_floorplan \\');
+    buf.writeln('        -die_area "0 0 \$TILE_DIE_W \$TILE_DIE_H" \\');
+    buf.writeln(
+      '        -core_area "1 1 [expr {\$TILE_DIE_W - 1}] [expr {\$TILE_DIE_H - 1}]" \\',
+    );
+    buf.writeln('        -site \$SITE_NAME');
+    buf.writeln('} else {');
+    buf.writeln('    initialize_floorplan \\');
+    buf.writeln('        -utilization \$TILE_UTIL \\');
+    buf.writeln('        -core_space 1 \\');
+    buf.writeln('        -site \$SITE_NAME');
+    buf.writeln('}');
+    buf.writeln();
+
+    // Routing tracks
+    buf.writeln('foreach layer [get_routing_layers] {');
+    buf.writeln(
+      '    if {![catch {set tech_layer '
+      '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
+    );
+    buf.writeln('        if {\$tech_layer ne "NULL"} {');
+    buf.writeln(
+      '            set pitch_x '
+      '[ord::dbu_to_microns [\$tech_layer getPitchX]]',
+    );
+    buf.writeln(
+      '            set pitch_y '
+      '[ord::dbu_to_microns [\$tech_layer getPitchY]]',
+    );
+    buf.writeln('            if {\$pitch_x > 0 && \$pitch_y > 0} {');
+    buf.writeln('                make_tracks \$layer \\');
+    buf.writeln('                    -x_offset 0 -x_pitch \$pitch_x \\');
+    buf.writeln('                    -y_offset 0 -y_pitch \$pitch_y');
+    buf.writeln('            }');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln();
+
+    buf.writeln('# Pin placement on edges for inter-tile connectivity');
+    _writeLayerDetection(buf);
+    buf.writeln('place_pins -hor_layers \$hor_layer -ver_layers \$ver_layer');
+    buf.writeln();
+
+    // Power
+    buf.writeln('add_global_connection -net VDD -pin_pattern VDD -power');
+    buf.writeln('add_global_connection -net VSS -pin_pattern VSS -ground');
+    buf.writeln('global_connect');
+    buf.writeln();
+
+    // Placement
+    buf.writeln('global_placement -density \$TILE_UTIL');
+    buf.writeln('detailed_placement');
+    buf.writeln();
+
+    // CTS
+    buf.writeln('estimate_parasitics -placement');
+    buf.writeln('set cts_bufs {}');
+    buf.writeln('foreach sz {2 4 8} {');
+    buf.writeln('    set cell_name \${CELL_LIB}__clkbuf_\$sz');
+    buf.writeln('    lappend cts_bufs \$cell_name');
+    buf.writeln('}');
+    buf.writeln('clock_tree_synthesis -buf_list \$cts_bufs');
+    buf.writeln('detailed_placement');
+    buf.writeln();
+
+    // Route
+    buf.writeln('set top_route_layer ""');
+    buf.writeln('foreach layer [lreverse [get_routing_layers]] {');
+    buf.writeln(
+      '    if {![catch {set tl '
+      '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
+    );
+    buf.writeln('        if {\$tl ne "NULL" && \$top_route_layer eq ""} {');
+    buf.writeln('            set top_route_layer \$layer');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln('if {\$top_route_layer eq ""} { set top_route_layer Metal2 }');
+    buf.writeln('set_routing_layers -signal Metal1-\$top_route_layer');
+    buf.writeln('global_route -allow_congestion');
+    buf.writeln('detailed_route');
+    buf.writeln();
+
+    // Reports
+    buf.writeln(
+      'report_checks -path_delay min_max '
+      '> ${tileModule}_timing.rpt',
+    );
+    buf.writeln('report_design_area > ${tileModule}_area.rpt');
+    buf.writeln();
+
+    // Write outputs
+    buf.writeln('write_def \${DEVICE_NAME}_${tileModule}_final.def');
+    buf.writeln('write_verilog \${DEVICE_NAME}_${tileModule}_final.v');
+    buf.writeln();
+
+    // Generate LEF abstract for top-level PnR
+    buf.writeln('# Generate LEF abstract for use as a macro');
+    buf.writeln('write_abstract_lef \${DEVICE_NAME}_${tileModule}.lef');
+    buf.writeln();
+
+    // Generate liberty timing model for top-level STA
+    buf.writeln('# Generate liberty timing model for timing analysis');
+    buf.writeln('write_timing_model \${DEVICE_NAME}_${tileModule}.lib');
+    buf.writeln();
+
+    return buf.toString();
+  }
+
+  void _writeLayerDetection(StringBuffer buf) {
+    buf.writeln('set hor_layer ""');
+    buf.writeln('set ver_layer ""');
+    buf.writeln('foreach layer [get_routing_layers] {');
+    buf.writeln(
+      '    if {![catch {set tl '
+      '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
+    );
+    buf.writeln('        if {\$tl ne "NULL"} {');
+    buf.writeln('            set dir [\$tl getDirection]');
+    buf.writeln(
+      '            if {\$dir eq "HORIZONTAL" && \$hor_layer eq ""} {',
+    );
+    buf.writeln('                set hor_layer \$layer');
+    buf.writeln('            }');
+    buf.writeln('            if {\$dir eq "VERTICAL" && \$ver_layer eq ""} {');
+    buf.writeln('                set ver_layer \$layer');
+    buf.writeln('            }');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln('if {\$hor_layer eq ""} { set hor_layer Metal1 }');
+    buf.writeln('if {\$ver_layer eq ""} { set ver_layer Metal2 }');
+  }
+}

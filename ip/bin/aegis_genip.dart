@@ -174,9 +174,50 @@ Future<void> main(List<String> arguments) async {
       serdesCount: serdesCount,
       clockTileCount: clockTiles,
     );
+    // Top-level assembly script (reads pre-synthesized tile macros)
     File(
       '$outputDir/${fpga.name}-yosys.tcl',
     ).writeAsStringSync(yosysEmitter.generate());
+    // Determine which macro modules actually exist in the generated SV
+    final svContent = File('$outputDir/${fpga.name}.sv').readAsStringSync();
+    final presentModules = YosysTclEmitter.macroModules
+        .where((mod) => svContent.contains('module $mod ('))
+        .toList();
+
+    // Per-tile synthesis scripts (only for modules that exist)
+    for (final mod in presentModules) {
+      File(
+        '$outputDir/${fpga.name}-yosys-$mod.tcl',
+      ).writeAsStringSync(yosysEmitter.generateTileSynth(mod));
+    }
+    final stubs = StringBuffer();
+    stubs.writeln(
+      '// Auto-generated tile blackbox stubs for hierarchical synthesis',
+    );
+    stubs.writeln(
+      '// These are empty modules with matching ports so the top-level',
+    );
+    stubs.writeln(
+      '// synthesis can elaborate without processing tile internals.',
+    );
+    stubs.writeln();
+    for (final mod in presentModules) {
+      final modStart = svContent.indexOf('module $mod (');
+      if (modStart == -1) continue;
+
+      // Extract from "module X (" to the closing ");"
+      final portEnd = svContent.indexOf(');', modStart);
+      if (portEnd == -1) continue;
+
+      final decl = svContent.substring(modStart, portEnd + 2);
+      stubs.writeln('(* blackbox *)');
+      stubs.writeln(decl);
+      stubs.writeln('endmodule');
+      stubs.writeln();
+    }
+    File(
+      '$outputDir/${fpga.name}_tile_stubs.v',
+    ).writeAsStringSync(stubs.toString());
 
     final techmapEmitter = YosysTechmapEmitter(
       deviceName: fpga.name,
@@ -208,11 +249,24 @@ Future<void> main(List<String> arguments) async {
       height: height,
       serdesCount: serdesCount,
       clockTileCount: clockTiles,
+      bramColumnInterval: bramInterval,
+      dspColumnInterval: dspInterval,
       hasConfigClk: results.flag('config-clk'),
     );
     File(
       '$outputDir/${fpga.name}-openroad.tcl',
     ).writeAsStringSync(openroadEmitter.generate());
+
+    // Per-tile OpenROAD PnR scripts (tile macro hardening)
+    final tileOpenroadEmitter = OpenroadTileTclEmitter(
+      deviceName: fpga.name,
+      tracks: tracks,
+    );
+    for (final mod in presentModules) {
+      File(
+        '$outputDir/${fpga.name}-openroad-$mod.tcl',
+      ).writeAsStringSync(tileOpenroadEmitter.generateTilePnr(mod));
+    }
 
     print('Generated:');
     print('  $outputDir/${fpga.name}.sv');
@@ -220,10 +274,16 @@ Future<void> main(List<String> arguments) async {
     print('  $outputDir/${fpga.name}-xschem.tcl');
     print('  $outputDir/${fpga.name}-xschem.sch');
     print('  $outputDir/${fpga.name}-yosys.tcl');
+    for (final mod in presentModules) {
+      print('  $outputDir/${fpga.name}-yosys-$mod.tcl');
+    }
     print('  $outputDir/${fpga.name}_cells.v');
     print('  $outputDir/${fpga.name}_techmap.v');
     print('  $outputDir/${fpga.name}-synth-aegis.tcl');
     print('  $outputDir/${fpga.name}-openroad.tcl');
+    for (final mod in presentModules) {
+      print('  $outputDir/${fpga.name}-openroad-$mod.tcl');
+    }
   } on FormatException catch (e) {
     print(e.message);
     print('');
