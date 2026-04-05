@@ -1,6 +1,7 @@
 import 'package:rohd/rohd.dart';
 import 'package:rohd_hcl/rohd_hcl.dart';
 
+/// Streams configuration bits into the FPGA fabric config chain.
 class FabricConfigLoader extends Module {
   Logic get clk => input('clk');
   Logic get start => input('start');
@@ -37,92 +38,81 @@ class FabricConfigLoader extends Module {
     final wordWidth = readPort.data.width;
     final wordsNeeded = (totalBits + wordWidth - 1) ~/ wordWidth;
 
-    // Use rohd_hcl Deserializer to collect words from memory into a
-    // flat LogicArray, then a Serializer to shift them out bit-by-bit.
     final active = Logic(name: 'active');
     final wordAddr = Logic(width: readPort.addr.width, name: 'wordAddr');
-    final wordCount = Logic(width: wordsNeeded.bitLength, name: 'wordCount');
-    final fetchDone = Logic(name: 'fetchDone');
-
-    // --- Word fetch FSM: reads words from memory sequentially ---
-    Sequential(clk, [
-      If(
-        start,
-        then: [
-          active < Const(1),
-          wordAddr < Const(0, width: wordAddr.width),
-          wordCount < Const(0, width: wordCount.width),
-          fetchDone < Const(0),
-        ],
-        orElse: [
-          If(
-            active & ~fetchDone,
-            then: [
-              wordCount < wordCount + 1,
-              wordAddr < wordAddr + 1,
-              If(
-                wordCount.eq(Const(wordsNeeded - 1, width: wordCount.width)),
-                then: [fetchDone < Const(1)],
-              ),
-            ],
-          ),
-        ],
-      ),
-    ]);
-
-    readPort.en <= active & ~fetchDone;
-    readPort.addr <= wordAddr;
-
-    // --- Deserializer: collects words into a wide register ---
-    final deser = Deserializer(
-      readPort.data,
-      wordsNeeded,
-      clk: clk,
-      reset: start,
-      enable: active & ~fetchDone,
+    final wordBuf = Logic(width: wordWidth, name: 'wordBuf');
+    final bitIdx = Logic(width: wordWidth.bitLength, name: 'bitIdx');
+    final totalShifted = Logic(
+      width: totalBits.bitLength,
+      name: 'totalShifted',
     );
-
-    // --- Serializer: shifts the collected words out bit-by-bit ---
-    // We need to serialize the deserialized array one bit at a time.
-    // Use a simple bit counter + shift approach on the deserialized output.
-    final bitCounter = Logic(width: totalBits.bitLength, name: 'bitCounter');
     final shifting = Logic(name: 'shifting');
-    final shiftDone = Logic(name: 'shiftDone');
-
-    // Flatten the deserialized array into a single wide bus
-    final flatBits = Logic(width: wordsNeeded * wordWidth, name: 'flatBits');
-    flatBits <=
-        deser.deserialized.elements
-            .map((e) => e)
-            .toList()
-            .reversed
-            .toList()
-            .swizzle();
-
-    // Latch the flat bits when deserialization completes
-    final latchedBits = Logic(
-      width: wordsNeeded * wordWidth,
-      name: 'latchedBits',
-    );
+    final wordReady = Logic(name: 'wordReady');
+    final allDone = Logic(name: 'allDone');
 
     Sequential(
       clk,
       [
         If(
-          deser.done & active,
+          start,
           then: [
-            latchedBits < flatBits,
-            shifting < Const(1),
-            bitCounter < Const(0, width: bitCounter.width),
+            active < Const(1),
+            wordAddr < Const(0, width: wordAddr.width),
+            bitIdx < Const(0, width: bitIdx.width),
+            totalShifted < Const(0, width: totalShifted.width),
+            shifting < Const(0),
+            wordReady < Const(0),
+            allDone < Const(0),
           ],
           orElse: [
             If(
-              shifting,
+              active & ~allDone,
               then: [
-                bitCounter < bitCounter + 1,
                 If(
-                  bitCounter.eq(Const(totalBits - 1, width: bitCounter.width)),
-                  then: [shifting < Const(0), shiftDone < Const(1)],
+                  ~shifting & ~wordReady,
+                  then: [
+                    wordBuf < readPort.data,
+                    wordReady < Const(1),
+                    bitIdx < Const(0, width: bitIdx.width),
+                  ],
+                  orElse: [
+                    If(
+                      wordReady & ~shifting,
+                      then: [shifting < Const(1)],
+                      orElse: [
+                        If(
+                          shifting,
+                          then: [
+                            bitIdx < bitIdx + 1,
+                            totalShifted < totalShifted + 1,
+                            If(
+                              totalShifted.eq(
+                                Const(totalBits - 1, width: totalShifted.width),
+                              ),
+                              then: [
+                                // All bits shifted
+                                allDone < Const(1),
+                                shifting < Const(0),
+                              ],
+                              orElse: [
+                                If(
+                                  bitIdx.eq(
+                                    Const(wordWidth - 1, width: bitIdx.width),
+                                  ),
+                                  then: [
+                                    // Word exhausted, fetch next
+                                    shifting < Const(0),
+                                    wordReady < Const(0),
+                                    wordAddr < wordAddr + 1,
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -131,15 +121,22 @@ class FabricConfigLoader extends Module {
       ],
       reset: start,
       resetValues: {
+        active: Const(0),
         shifting: Const(0),
-        shiftDone: Const(0),
-        bitCounter: Const(0, width: bitCounter.width),
-        latchedBits: Const(0, width: latchedBits.width),
+        wordReady: Const(0),
+        allDone: Const(0),
+        wordAddr: Const(0, width: wordAddr.width),
+        wordBuf: Const(0, width: wordWidth),
+        bitIdx: Const(0, width: bitIdx.width),
+        totalShifted: Const(0, width: totalShifted.width),
       },
     );
 
-    cfgIn <= mux(shifting, latchedBits[bitCounter], Const(0));
-    cfgLoad <= shiftDone;
-    done <= shiftDone & ~active;
+    readPort.en <= active & ~allDone & ~shifting & ~wordReady;
+    readPort.addr <= wordAddr;
+
+    cfgIn <= mux(shifting, wordBuf[bitIdx], Const(0));
+    cfgLoad <= allDone;
+    done <= allDone;
   }
 }

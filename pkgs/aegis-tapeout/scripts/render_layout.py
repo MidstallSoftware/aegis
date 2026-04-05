@@ -51,19 +51,11 @@ else:
     view.set_current_cell_path(cv, [top_cell.cell_index()])
     view.set_config("background-color", "#000000")
 
-    # Find the bounding box of child cell instances (placed standard cells)
-    # rather than the top cell bbox (which includes the die boundary)
-    content_bbox = pya.Box()
-    for inst in top_cell.each_inst():
-        content_bbox += inst.bbox()
-
-    if not content_bbox.empty():
-        dbox = pya.DBox(content_bbox) * layout.dbu
-        margin = max(dbox.width(), dbox.height()) * 0.1
-        dbox = dbox.enlarged(margin, margin)
-        view.zoom_box(dbox)
-    else:
-        view.zoom_fit()
+    # Zoom to the full top cell bounding box (die boundary)
+    dbox = pya.DBox(top_cell.bbox()) * layout.dbu
+    margin = max(dbox.width(), dbox.height()) * 0.05
+    dbox = dbox.enlarged(margin, margin)
+    view.zoom_box(dbox)
 
     view.save_image(out_png, img_w, img_h)
     print(f"Rendered {top_cell.name} ({img_w}x{img_h}) to {out_png}")

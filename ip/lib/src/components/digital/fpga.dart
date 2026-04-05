@@ -54,10 +54,12 @@ class AegisFPGA extends Module {
     addOutput('padOut', width: pads);
     addOutput('padOutputEnable', width: pads);
 
-    serialIn = addInput('serialIn', serialIn, width: serdesCount);
-    addOutput('serialOut', width: serdesCount);
-    addOutput('txReady', width: serdesCount);
-    addOutput('rxValid', width: serdesCount);
+    if (serdesCount > 0) {
+      serialIn = addInput('serialIn', serialIn, width: serdesCount);
+      addOutput('serialOut', width: serdesCount);
+      addOutput('txReady', width: serdesCount);
+      addOutput('rxValid', width: serdesCount);
+    }
 
     addOutput('clkOut', width: clockTileCount * ClockTile.numOutputs);
     addOutput('clkLocked', width: clockTileCount);
@@ -149,9 +151,11 @@ class AegisFPGA extends Module {
 
     output('padOut') <= ioFabric.padOut;
     output('padOutputEnable') <= ioFabric.padOutputEnable;
-    output('serialOut') <= ioFabric.serialOut;
-    output('txReady') <= ioFabric.txReady;
-    output('rxValid') <= ioFabric.rxValid;
+    if (serdesCount > 0) {
+      output('serialOut') <= ioFabric.serialOut!;
+      output('txReady') <= ioFabric.txReady!;
+      output('rxValid') <= ioFabric.rxValid!;
+    }
   }
 
   /// Generates a JSON-serializable descriptor of the device, suitable for

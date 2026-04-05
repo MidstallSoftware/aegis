@@ -1,6 +1,5 @@
 {
   nextpnr,
-  aegisSrc ? ../..,
 }:
 
 nextpnr.overrideAttrs (old: {
@@ -24,8 +23,8 @@ nextpnr.overrideAttrs (old: {
   postPatch = (old.postPatch or "") + ''
     # Add Aegis viaduct uarch
     mkdir -p generic/viaduct/aegis
-    cp ${aegisSrc}/nextpnr-aegis/aegis.cc generic/viaduct/aegis/aegis.cc
-    cp ${aegisSrc}/nextpnr-aegis/aegis_test.cc generic/viaduct/aegis/aegis_test.cc
+    cp ${../../nextpnr-aegis/aegis.cc} generic/viaduct/aegis/aegis.cc
+    cp ${../../nextpnr-aegis/aegis_test.cc} generic/viaduct/aegis/aegis_test.cc
 
     # Register uarch source in CMakeLists.txt
     sed -i '/viaduct\/example\/example.cc/a\    viaduct/aegis/aegis.cc' generic/CMakeLists.txt

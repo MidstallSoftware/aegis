@@ -55,6 +55,10 @@ stdenvNoCC.mkDerivation {
     siteName = "unithd";
     pdkName = "sky130";
     pdkPath = "share/pdk/sky130";
+    commentLayer = {
+      layer = 236;
+      datatype = 0;
+    };
   };
 
   meta = {
