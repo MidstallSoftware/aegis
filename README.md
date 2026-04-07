@@ -2,16 +2,21 @@
 
 Aegis is a fully open-source FPGA, from the silicon up.
 
-Existing open-source FPGA efforts either reverse-engineer proprietary
-architectures (Project IceStorm, Apicula) or build tooling around closed
-silicon (Yosys, nextpnr). The silicon itself has always been proprietary.
-Aegis starts at the other end: the fabric design is open, the toolchain
-is open, and the path to real silicon goes through open PDKs and shuttle
-services like [wafer.space](https://wafer.space).
+Open-source FPGA efforts have made huge strides: projects like Project
+IceStorm and Apicula reverse-engineer proprietary bitstream formats,
+OpenFPGA and FABulous generate open FPGA fabric from architecture
+descriptions, and Cologne Chip's GateMate ships a commercial FPGA with a
+fully open-source toolchain. Where these projects each tackle a piece of
+the puzzle, Aegis is a full-stack, end-to-end open-source FPGA: fabric
+generation, synthesis, place-and-route, bitstream packing, simulation,
+and tapeout all live in one project, designed from the ground up for open
+source. From HDL to GDS, nothing is behind a proprietary wall.
 
 The project generates parameterized FPGA devices with LUT4, BRAM, DSP,
 SerDes, and clock management tiles, along with everything needed to
-synthesize user designs onto them and tape out the fabric itself to a foundry.
+synthesize user designs onto them and tape out the fabric itself to a
+foundry via open PDKs and shuttle services like
+[wafer.space](https://wafer.space).
 
 ## Devices
 
@@ -102,3 +107,23 @@ synthesizable SystemVerilog. The architecture follows Xilinx-style conventions:
 
 Configuration is loaded via a serial shift register chain:
 clock tiles -> IO tiles -> SerDes tiles -> fabric tiles (row-major).
+
+## Related Projects
+
+- **[OpenFPGA](https://github.com/lnis-uofu/OpenFPGA)** — An open-source FPGA
+  IP generator from the University of Utah. Given an XML architecture
+  description, it generates synthesizable Verilog for a complete FPGA fabric
+  along with bitstream tooling and self-testing infrastructure. Silicon-proven
+  through DARPA's POSH program.
+
+- **[FABulous](https://github.com/FPGA-Research-Manchester/FABulous)** — An
+  open-source embedded FPGA (eFPGA) framework from the University of Manchester.
+  Generates custom FPGA fabric from CSV-based configuration and integrates Yosys
+  and nextpnr. Silicon-proven with 12+ tapeouts across nodes from TSMC 180nm
+  down to 28nm CMOS.
+
+- **[Cologne Chip GateMate](https://colognechip.com/programmable-logic/gatemate/)**
+  — A commercial FPGA on GlobalFoundries 28nm with a fully open-source,
+  license-free toolchain built on Yosys, nextpnr, and openFPGALoader. The
+  silicon itself is proprietary, but it is notable as one of the few commercial
+  FPGAs to embrace open-source EDA tools end-to-end.
