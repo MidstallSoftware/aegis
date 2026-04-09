@@ -345,7 +345,11 @@ impl VcdWriter {
 
     pub fn add_signal(&mut self, name: &str) -> char {
         let id = self.next_id;
-        self.next_id = (self.next_id as u8 + 1) as char;
+        if id < '~' {
+            self.next_id = (self.next_id as u8 + 1) as char;
+        } else {
+            panic!("VcdWriter: too many signals for single-character VCD IDs");
+        }
         self.buf
             .push_str(&format!("$var wire 1 {id} {name} $end\n"));
         self.signals.push((name.to_string(), id));

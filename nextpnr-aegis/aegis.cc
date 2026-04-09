@@ -238,7 +238,7 @@ private:
             tw.track_w.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("W%d", t)),
                                               ctx->id("ROUTING"), x, y));
           }
-        } else if (x != y) {
+        } else if (!(x == 0 && y == 0) && !(x == W - 1 && y == 0) && !(x == 0 && y == H - 1) && !(x == W - 1 && y == H - 1)) {
           // IO tile wires
           for (int z = 0; z < 2; z++) {
             tw.pad.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("PAD%d", z)),
@@ -269,7 +269,9 @@ private:
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         if (is_io(x, y)) {
-          if (x == y)
+          // Skip corner tiles — they have no IO pads
+          if ((x == 0 && y == 0) || (x == W - 1 && y == 0) ||
+              (x == 0 && y == H - 1) || (x == W - 1 && y == H - 1))
             continue;
           add_io_bels(x, y);
         } else {
@@ -320,7 +322,8 @@ private:
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         if (is_io(x, y)) {
-          if (x != y)
+          if (!((x == 0 && y == 0) || (x == W - 1 && y == 0) ||
+                (x == 0 && y == H - 1) || (x == W - 1 && y == H - 1)))
             add_io_pips(x, y);
         } else {
           add_logic_pips(x, y);
