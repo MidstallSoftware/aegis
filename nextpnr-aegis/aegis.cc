@@ -180,6 +180,10 @@ private:
     return (x == 0) || (x == (W - 1)) || (y == 0) || (y == (H - 1));
   }
 
+  bool is_corner(int x, int y) const {
+    return (x == 0 || x == W - 1) && (y == 0 || y == H - 1);
+  }
+
   PipId add_pip(Loc loc, WireId src, WireId dst, delay_t delay = 0.05) {
     IdStringList name =
         IdStringList::concat(ctx->getWireName(dst), ctx->getWireName(src));
@@ -238,7 +242,7 @@ private:
             tw.track_w.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("W%d", t)),
                                               ctx->id("ROUTING"), x, y));
           }
-        } else if (x != y) {
+        } else if (!is_corner(x, y)) {
           // IO tile wires
           for (int z = 0; z < 2; z++) {
             tw.pad.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("PAD%d", z)),
@@ -269,7 +273,7 @@ private:
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         if (is_io(x, y)) {
-          if (x == y)
+          if (is_corner(x, y))
             continue;
           add_io_bels(x, y);
         } else {
@@ -320,7 +324,7 @@ private:
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         if (is_io(x, y)) {
-          if (x != y)
+          if (!is_corner(x, y))
             add_io_pips(x, y);
         } else {
           add_logic_pips(x, y);
