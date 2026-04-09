@@ -94,7 +94,7 @@ pub fn set_bit(bits: &mut [u8], offset: usize) {
 /// Clear bits at a given offset and width.
 pub fn clear_bits(bits: &mut [u8], offset: usize, width: usize) {
     for i in 0..width {
-        bits[(offset + i) / 8] &= !(1 << ((offset + i) % 8));
+        bits[(offset + i) / 8] &= !(1u8 << ((offset + i) % 8));
     }
 }
 
@@ -102,7 +102,7 @@ pub fn clear_bits(bits: &mut [u8], offset: usize, width: usize) {
 pub fn write_bits(bits: &mut [u8], offset: usize, value: u64, width: usize) {
     clear_bits(bits, offset, width);
     for i in 0..width {
-        if value & (1 << i) != 0 {
+        if value & (1u64 << i) != 0 {
             set_bit(bits, offset + i);
         }
     }
@@ -115,7 +115,7 @@ pub fn read_bits(bits: &[u8], offset: usize, width: usize) -> u64 {
         let byte_idx = (offset + i) / 8;
         let bit_idx = (offset + i) % 8;
         if byte_idx < bits.len() && bits[byte_idx] & (1 << bit_idx) != 0 {
-            val |= 1 << i;
+            val |= 1u64 << i;
         }
     }
     val
