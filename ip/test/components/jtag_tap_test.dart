@@ -12,6 +12,7 @@ void main() {
   late Logic tms;
   late Logic tdi;
   late Logic trst;
+  late Logic userTdoIn;
   late JtagTap tap;
 
   Future<void> setupTap({int idcode = 0xDEADBEEF}) async {
@@ -20,8 +21,9 @@ void main() {
     tms = Logic();
     tdi = Logic();
     trst = Logic();
+    userTdoIn = Logic();
 
-    tap = JtagTap(tck, tms, tdi, trst, idcode: idcode);
+    tap = JtagTap(tck, tms, tdi, trst, idcode: idcode, userTdo: userTdoIn);
     await tap.build();
 
     unawaited(Simulator.run());
@@ -30,6 +32,7 @@ void main() {
     trst.put(1);
     tms.put(0);
     tdi.put(0);
+    userTdoIn.put(0);
     await tck.nextPosedge;
     await tck.nextPosedge;
     trst.put(0);
@@ -420,6 +423,205 @@ void main() {
       });
     });
 
+    group('USER', () {
+      test('enableUser asserted when USER instruction loaded', () async {
+        await setupTap();
+        await gotoIdle();
+        expect(tap.enableUser.value.toInt(), 0);
+
+        await gotoShiftIr();
+        await loadIr(JtagTap.USER);
+        expect(tap.enableUser.value.toInt(), 1);
+
+        await Simulator.endSimulation();
+      });
+
+      test('userShift asserted during Shift-DR in USER mode', () async {
+        await setupTap();
+        await gotoIdle();
+
+        await gotoShiftIr();
+        await loadIr(JtagTap.USER);
+
+        expect(tap.userShift.value.toInt(), 0);
+
+        await gotoShiftDr();
+        expect(tap.userShift.value.toInt(), 1);
+
+        // Exit
+        tms.put(1);
+        await tck.nextPosedge; // Exit1-DR
+        expect(tap.userShift.value.toInt(), 0);
+
+        tms.put(1);
+        await tck.nextPosedge; // Update-DR
+        tms.put(0);
+        await tck.nextPosedge; // RTI
+
+        await Simulator.endSimulation();
+      });
+
+      test('userCapture asserted during Capture-DR in USER mode', () async {
+        await setupTap();
+        await gotoIdle();
+
+        await gotoShiftIr();
+        await loadIr(JtagTap.USER);
+
+        // Go to Capture-DR (stop before Shift-DR)
+        tms.put(1);
+        await tck.nextPosedge; // RTI -> Select-DR-Scan
+        tms.put(0);
+        await tck.nextPosedge; // Select-DR-Scan -> Capture-DR
+        expect(tap.userCapture.value.toInt(), 1);
+
+        tms.put(0);
+        await tck.nextPosedge; // Capture-DR -> Shift-DR
+        expect(tap.userCapture.value.toInt(), 0);
+
+        // Exit
+        tms.put(1);
+        await tck.nextPosedge; // Exit1-DR
+        tms.put(1);
+        await tck.nextPosedge; // Update-DR
+        tms.put(0);
+        await tck.nextPosedge; // RTI
+
+        await Simulator.endSimulation();
+      });
+
+      test('userUpdate asserted during Update-DR in USER mode', () async {
+        await setupTap();
+        await gotoIdle();
+
+        await gotoShiftIr();
+        await loadIr(JtagTap.USER);
+
+        await gotoShiftDr();
+        tdi.put(1);
+        tms.put(0);
+        await tck.nextPosedge; // shift one bit
+
+        tms.put(1);
+        await tck.nextPosedge; // Exit1-DR
+        expect(tap.userUpdate.value.toInt(), 0);
+
+        tms.put(1);
+        await tck.nextPosedge; // Update-DR
+        expect(tap.userUpdate.value.toInt(), 1);
+
+        tms.put(0);
+        await tck.nextPosedge; // RTI
+        expect(tap.userUpdate.value.toInt(), 0);
+
+        await Simulator.endSimulation();
+      });
+
+      test('userTdi passes TDI through to fabric', () async {
+        await setupTap();
+        await gotoIdle();
+
+        await gotoShiftIr();
+        await loadIr(JtagTap.USER);
+
+        await gotoShiftDr();
+
+        tdi.put(1);
+        tms.put(0);
+        await tck.nextPosedge;
+        expect(tap.userTdi.value.toInt(), 1);
+
+        tdi.put(0);
+        await tck.nextPosedge;
+        expect(tap.userTdi.value.toInt(), 0);
+
+        // Exit
+        tms.put(1);
+        await tck.nextPosedge;
+        tms.put(1);
+        await tck.nextPosedge;
+        tms.put(0);
+        await tck.nextPosedge;
+
+        await Simulator.endSimulation();
+      });
+
+      test('userTdo feeds back into TDO', () async {
+        await setupTap();
+        await gotoIdle();
+
+        await gotoShiftIr();
+        await loadIr(JtagTap.USER);
+
+        await gotoShiftDr();
+
+        // User design drives TDO via userTdoIn
+        userTdoIn.put(1);
+        expect(tap.tdo.value.toInt(), 1);
+
+        userTdoIn.put(0);
+        // Need a delta for combinational update
+        tms.put(0);
+        await tck.nextPosedge;
+        userTdoIn.put(0);
+        expect(tap.tdo.value.toInt(), 0);
+
+        userTdoIn.put(1);
+        expect(tap.tdo.value.toInt(), 1);
+
+        // Exit
+        tms.put(1);
+        await tck.nextPosedge;
+        tms.put(1);
+        await tck.nextPosedge;
+        tms.put(0);
+        await tck.nextPosedge;
+
+        await Simulator.endSimulation();
+      });
+
+      test('user signals not active in other modes', () async {
+        await setupTap();
+        await gotoIdle();
+
+        // Load IDCODE instead of USER
+        await gotoShiftIr();
+        await loadIr(JtagTap.IDCODE_INST);
+
+        expect(tap.enableUser.value.toInt(), 0);
+
+        await gotoShiftDr();
+        expect(tap.userShift.value.toInt(), 0);
+        expect(tap.userCapture.value.toInt(), 0);
+
+        tms.put(1);
+        await tck.nextPosedge; // Exit1-DR
+        tms.put(1);
+        await tck.nextPosedge; // Update-DR
+        expect(tap.userUpdate.value.toInt(), 0);
+
+        tms.put(0);
+        await tck.nextPosedge; // RTI
+
+        await Simulator.endSimulation();
+      });
+
+      test('userReset asserted in Test-Logic-Reset', () async {
+        await setupTap();
+        await gotoIdle();
+        expect(tap.userReset.value.toInt(), 0);
+
+        // Five TMS=1 clocks to reach TLR
+        for (int i = 0; i < 5; i++) {
+          tms.put(1);
+          await tck.nextPosedge;
+        }
+        expect(tap.userReset.value.toInt(), 1);
+
+        await Simulator.endSimulation();
+      });
+    });
+
     group('descriptor', () {
       test('produces correct descriptor', () {
         final desc = JtagTap.descriptor(idcode: 0x12345678);
@@ -428,6 +630,7 @@ void main() {
         expect(desc['ir_width'], 4);
         expect(desc['instructions']['IDCODE'], JtagTap.IDCODE_INST);
         expect(desc['instructions']['CONFIG'], JtagTap.CONFIG);
+        expect(desc['instructions']['USER'], JtagTap.USER);
         expect(desc['instructions']['BYPASS'], JtagTap.BYPASS);
       });
     });

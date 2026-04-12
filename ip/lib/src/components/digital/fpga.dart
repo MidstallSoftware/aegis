@@ -78,10 +78,23 @@ class AegisFPGA extends Module {
       final tms = addInput('tms', Logic());
       final tdi = addInput('tdi', Logic());
       final trst = addInput('trst', Logic());
+      final userTdo = addInput('userTdo', Logic());
       addOutput('tdo');
 
-      jtag = JtagTap(tck, tms, tdi, trst);
+      // User data register interface - exposed to fabric for debug
+      addOutput('userTdi');
+      addOutput('userShift');
+      addOutput('userUpdate');
+      addOutput('userCapture');
+      addOutput('userReset');
+
+      jtag = JtagTap(tck, tms, tdi, trst, userTdo: userTdo);
       output('tdo') <= jtag.tdo;
+      output('userTdi') <= jtag.userTdi;
+      output('userShift') <= jtag.userShift;
+      output('userUpdate') <= jtag.userUpdate;
+      output('userCapture') <= jtag.userCapture;
+      output('userReset') <= jtag.userReset;
     }
 
     configReadPort = configReadPort.clone()
