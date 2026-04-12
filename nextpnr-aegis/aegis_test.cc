@@ -46,6 +46,11 @@ protected:
     return x == 0 || x == gw() - 1 || y == 0 || y == gh() - 1;
   }
 
+  // Find a BEL by name string "X{x}/Y{y}/name"
+  BelId find_bel(const std::string &name) const {
+    return ctx->getBelByName(IdStringList::parse(ctx, name));
+  }
+
   // Find a wire by name string "X{x}/Y{y}/name"
   WireId find_wire(const std::string &name) const {
     auto id = ctx->getWireByName(IdStringList::parse(ctx, name));
@@ -368,10 +373,23 @@ TEST_F(AegisTest, IOTileHasIOBels) {
   EXPECT_NE(io1, BelId()) << "Missing IO1 BEL";
 }
 
-TEST_F(AegisTest, CornerTilesHaveNoBels) {
-  // Corner tile (0,0) should have no BELs (x == y for corners)
-  auto wires = wires_at(0, 0);
-  EXPECT_TRUE(wires.empty()) << "Corner tile should have no wires/BELs";
+TEST_F(AegisTest, CornerTilesHaveNoBelsExceptJtag) {
+  // Corner (0,0) has the JTAG BEL; other corners have nothing
+  auto w00 = wires_at(0, 0);
+  EXPECT_FALSE(w00.empty()) << "Corner (0,0) should have JTAG wires";
+
+  // Verify the JTAG BEL exists
+  auto jtag_bel = find_bel("X0/Y0/JTAG0");
+  EXPECT_NE(jtag_bel, BelId()) << "JTAG BEL should exist at (0,0)";
+
+  // Other corners should still be empty
+  int gw_val = gw(), gh_val = gh();
+  auto w_tr = wires_at(gw_val - 1, 0);
+  EXPECT_TRUE(w_tr.empty()) << "Corner (W-1,0) should have no wires";
+  auto w_bl = wires_at(0, gh_val - 1);
+  EXPECT_TRUE(w_bl.empty()) << "Corner (0,H-1) should have no wires";
+  auto w_br = wires_at(gw_val - 1, gh_val - 1);
+  EXPECT_TRUE(w_br.empty()) << "Corner (W-1,H-1) should have no wires";
 }
 
 // === Completeness tests ===

@@ -233,6 +233,7 @@ Future<void> main(List<String> arguments) async {
       bramDataWidth: 8,
       bramAddrWidth: 7,
       bramColumnInterval: bramInterval,
+      hasJtag: results.flag('jtag'),
     );
     File(
       '$outputDir/${fpga.name}_cells.v',

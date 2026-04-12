@@ -30,9 +30,12 @@ struct AegisImpl : ViaductAPI {
   int K = 4;
 
   // Cached IdStrings
-  IdString id_LUT4, id_DFF, id_IOB, id_INBUF, id_OUTBUF;
+  IdString id_LUT4, id_DFF, id_IOB, id_INBUF, id_OUTBUF, id_JTAG;
   IdString id_CLK, id_D, id_Q, id_F, id_I, id_O, id_PAD, id_EN;
   IdString id_INIT, id_PIP, id_LOCAL;
+
+  // JTAG wires (global)
+  WireId jtag_tdi, jtag_tdo, jtag_shift, jtag_update, jtag_capture, jtag_reset;
 
   dict<std::string, std::string> device_args;
 
@@ -61,6 +64,7 @@ struct AegisImpl : ViaductAPI {
     id_IOB = ctx->id("IOB");
     id_INBUF = ctx->id("INBUF");
     id_OUTBUF = ctx->id("OUTBUF");
+    id_JTAG = ctx->id("JTAG");
     id_CLK = ctx->id("CLK");
     id_D = ctx->id("D");
     id_Q = ctx->id("Q");
@@ -168,6 +172,8 @@ struct AegisImpl : ViaductAPI {
 
   bool isBelLocationValid(BelId bel, bool explain_invalid) const override {
     Loc l = ctx->getBelLocation(bel);
+    if (l.x == 0 && l.y == 0)
+      return true; // JTAG BEL
     if (is_io(l.x, l.y))
       return true;
     return slice_valid(l.x, l.y, l.z / 2);
@@ -242,6 +248,20 @@ private:
             tw.track_w.push_back(ctx->addWire(h.xy_id(x, y, ctx->idf("W%d", t)),
                                               ctx->id("ROUTING"), x, y));
           }
+        } else if (x == 0 && y == 0) {
+          // Bottom-left corner: JTAG BEL site
+          jtag_tdi = ctx->addWire(h.xy_id(x, y, ctx->id("JTAG_TDI")),
+                                  ctx->id("JTAG"), x, y);
+          jtag_tdo = ctx->addWire(h.xy_id(x, y, ctx->id("JTAG_TDO")),
+                                  ctx->id("JTAG"), x, y);
+          jtag_shift = ctx->addWire(h.xy_id(x, y, ctx->id("JTAG_SHIFT")),
+                                    ctx->id("JTAG"), x, y);
+          jtag_update = ctx->addWire(h.xy_id(x, y, ctx->id("JTAG_UPDATE")),
+                                     ctx->id("JTAG"), x, y);
+          jtag_capture = ctx->addWire(h.xy_id(x, y, ctx->id("JTAG_CAPTURE")),
+                                      ctx->id("JTAG"), x, y);
+          jtag_reset = ctx->addWire(h.xy_id(x, y, ctx->id("JTAG_RESET")),
+                                    ctx->id("JTAG"), x, y);
         } else if (!is_corner(x, y)) {
           // IO tile wires
           for (int z = 0; z < 2; z++) {
@@ -273,9 +293,13 @@ private:
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         if (is_io(x, y)) {
-          if (is_corner(x, y))
+          if (x == 0 && y == 0) {
+            add_jtag_bel(x, y);
+          } else if (is_corner(x, y)) {
             continue;
-          add_io_bels(x, y);
+          } else {
+            add_io_bels(x, y);
+          }
         } else {
           add_logic_bels(x, y);
         }
@@ -295,6 +319,17 @@ private:
                        tw.io_in[std::min(z * 2 + 1, (int)tw.io_in.size() - 1)]);
       ctx->addBelOutput(b, id_O, tw.io_out[z]);
     }
+  }
+
+  void add_jtag_bel(int x, int y) {
+    BelId b = ctx->addBel(h.xy_id(x, y, ctx->id("JTAG0")), id_JTAG,
+                          Loc(x, y, 0), false, false);
+    ctx->addBelOutput(b, ctx->id("tdi"), jtag_tdi);
+    ctx->addBelInput(b, ctx->id("tdo"), jtag_tdo);
+    ctx->addBelOutput(b, ctx->id("shift"), jtag_shift);
+    ctx->addBelOutput(b, ctx->id("update"), jtag_update);
+    ctx->addBelOutput(b, ctx->id("capture"), jtag_capture);
+    ctx->addBelOutput(b, ctx->id("reset"), jtag_reset);
   }
 
   void add_logic_bels(int x, int y) {
@@ -332,6 +367,34 @@ private:
         add_inter_tile_pips(x, y);
       }
     }
+    add_jtag_pips();
+  }
+
+  void add_jtag_pips() {
+    // Connect JTAG wires to the adjacent fabric tile (1,1)
+    if (W <= 2 || H <= 2)
+      return;
+    auto &tw = tile_wires[1][1];
+    Loc loc(0, 0, 0);
+
+    // JTAG outputs -> fabric input tracks (so user designs can read them)
+    for (int t = 0; t < T; t++) {
+      add_pip(loc, jtag_tdi, tw.track_w[t], 0.05);
+      add_pip(loc, jtag_shift, tw.track_w[t], 0.05);
+      add_pip(loc, jtag_update, tw.track_w[t], 0.05);
+      add_pip(loc, jtag_capture, tw.track_w[t], 0.05);
+      add_pip(loc, jtag_reset, tw.track_w[t], 0.05);
+    }
+
+    // Fabric -> JTAG tdo (so user designs can drive TDO)
+    for (int t = 0; t < T; t++) {
+      add_pip(loc, tw.track_n[t], jtag_tdo, 0.05);
+      add_pip(loc, tw.track_e[t], jtag_tdo, 0.05);
+      add_pip(loc, tw.track_s[t], jtag_tdo, 0.05);
+      add_pip(loc, tw.track_w[t], jtag_tdo, 0.05);
+    }
+    add_pip(loc, tw.lut_out, jtag_tdo, 0.05);
+    add_pip(loc, tw.ff_q, jtag_tdo, 0.05);
   }
 
   void add_logic_pips(int x, int y) {
