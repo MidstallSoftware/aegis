@@ -21,6 +21,14 @@ class JtagTap extends Module {
   Logic get cfgReset => output('cfgReset');
   Logic get enableConfig => output('enableConfig');
 
+  // User data register interface - exposed to fabric for debug
+  Logic get userTdi => output('userTdi');
+  Logic get userShift => output('userShift');
+  Logic get userUpdate => output('userUpdate');
+  Logic get userCapture => output('userCapture');
+  Logic get userReset => output('userReset');
+  Logic get enableUser => output('enableUser');
+
   /// 32-bit device ID code.
   final int idcode;
 
@@ -30,6 +38,7 @@ class JtagTap extends Module {
   static const int EXTEST = 0x0;
   static const int IDCODE_INST = 0x1;
   static const int CONFIG = 0x2;
+  static const int USER = 0x3;
   static const int BYPASS = 0xF;
 
   // TAP states
@@ -56,17 +65,28 @@ class JtagTap extends Module {
     Logic tdi,
     Logic trst, {
     this.idcode = 0x00000001,
+    Logic? userTdo,
   }) : super(name: 'jtag_tap') {
     tck = addInput('tck', tck);
     tms = addInput('tms', tms);
     tdi = addInput('tdi', tdi);
     trst = addInput('trst', trst);
 
+    if (userTdo != null) {
+      userTdo = addInput('userTdoIn', userTdo);
+    }
+
     addOutput('tdo');
     addOutput('cfgIn');
     addOutput('cfgLoad');
     addOutput('cfgReset');
     addOutput('enableConfig');
+    addOutput('userTdi');
+    addOutput('userShift');
+    addOutput('userUpdate');
+    addOutput('userCapture');
+    addOutput('userReset');
+    addOutput('enableUser');
 
     // TAP state machine
     final state = Logic(width: 4, name: 'state');
@@ -272,6 +292,12 @@ class JtagTap extends Module {
       drOut,
     );
     drOut = mux(irReg.eq(Const(CONFIG, width: IR_WIDTH)), configBit, drOut);
+    // USER DR: TDO comes from the user design via userTdoIn
+    drOut = mux(
+      irReg.eq(Const(USER, width: IR_WIDTH)),
+      userTdo != null ? input('userTdoIn') : Const(0),
+      drOut,
+    );
 
     tdo <= mux(isShiftIr, irShift[0], mux(isShiftDr, drOut, Const(0)));
 
@@ -279,11 +305,21 @@ class JtagTap extends Module {
     final inConfigMode = irReg.eq(Const(CONFIG, width: IR_WIDTH));
     final inShiftDr = state.eq(Const(SHIFT_DR, width: 4));
     final inUpdateDr = state.eq(Const(UPDATE_DR, width: 4));
+    final inCaptureDr = state.eq(Const(CAPTURE_DR, width: 4));
 
     cfgIn <= mux(inConfigMode & inShiftDr, tdi, Const(0));
     cfgLoad <= inConfigMode & inUpdateDr;
     cfgReset <= state.eq(Const(TEST_LOGIC_RESET, width: 4)) | trst;
     enableConfig <= inConfigMode;
+
+    // User data register interface - active when IR = USER
+    final inUserMode = irReg.eq(Const(USER, width: IR_WIDTH));
+    output('userTdi') <= tdi;
+    output('userShift') <= inUserMode & inShiftDr;
+    output('userUpdate') <= inUserMode & inUpdateDr;
+    output('userCapture') <= inUserMode & inCaptureDr;
+    output('userReset') <= state.eq(Const(TEST_LOGIC_RESET, width: 4)) | trst;
+    output('enableUser') <= inUserMode;
   }
 
   static const int CONFIG_WIDTH = 0;
@@ -297,6 +333,7 @@ class JtagTap extends Module {
         'EXTEST': EXTEST,
         'IDCODE': IDCODE_INST,
         'CONFIG': CONFIG,
+        'USER': USER,
         'BYPASS': BYPASS,
       },
     };
