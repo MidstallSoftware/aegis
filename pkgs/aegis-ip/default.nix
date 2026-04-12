@@ -2,6 +2,9 @@
   lib,
   callPackage,
   stdenvNoCC,
+  dockerTools,
+  bashInteractive,
+  coreutils,
   mkShell,
   makeWrapper,
   yosys,
@@ -170,6 +173,31 @@ lib.extendMkDerivation {
             yosys
             surfer
           ];
+        };
+        docker = dockerTools.buildLayeredImage {
+          name = "aegis-${deviceName}";
+          tag = "latest";
+          contents = [
+            bashInteractive
+            coreutils
+            yosys
+            aegis-ip-tools
+            aegis-pack
+            aegis-sim
+            nextpnr-aegis
+            finalAttrs.finalPackage
+            finalAttrs.finalPackage.tools
+          ];
+          config = {
+            Env = [
+              "AEGIS_DEVICE_DIR=${finalAttrs.finalPackage}"
+            ];
+            Cmd = [ "/bin/bash" ];
+            WorkingDir = "/workspace";
+            Volumes = {
+              "/workspace" = { };
+            };
+          };
         };
       }
       // (args.passthru or { });
