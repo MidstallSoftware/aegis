@@ -108,6 +108,11 @@ synthesizable SystemVerilog. The architecture follows Xilinx-style conventions:
 Configuration is loaded via a serial shift register chain:
 clock tiles -> IO tiles -> SerDes tiles -> fabric tiles (row-major).
 
+## Community
+
+- **Discord**: [Join the server](https://discord.gg/HRhetTVcHG)
+- **Contact**: [inquire@midstall.com](mailto:inquire@midstall.com)
+
 ## Related Projects
 
 - **[OpenFPGA](https://github.com/lnis-uofu/OpenFPGA)** — An open-source FPGA
