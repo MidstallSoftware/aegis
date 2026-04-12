@@ -8,6 +8,7 @@ import 'dsp_basic_tile.dart';
 import 'fabric.dart';
 import 'fabric_config_loader.dart';
 import 'io_fabric.dart';
+import 'jtag_tap.dart';
 import 'io_tile.dart';
 import 'serdes_tile.dart';
 import 'tile.dart';
@@ -24,6 +25,7 @@ class AegisFPGA extends Module {
   final int bramAddrWidth;
   final int dspColumnInterval;
   final int clockTileCount;
+  final bool enableJtag;
 
   /// Total I/O pads (2*width + 2*height).
   int get totalPads => 2 * width + 2 * height;
@@ -41,6 +43,7 @@ class AegisFPGA extends Module {
     this.bramAddrWidth = 7,
     this.dspColumnInterval = 0,
     this.clockTileCount = 1,
+    this.enableJtag = false,
     required Logic padIn,
     required Logic serialIn,
     Logic? configClk,
@@ -66,6 +69,19 @@ class AegisFPGA extends Module {
 
     if (configClk != null) {
       configClk = addInput('configClk', configClk);
+    }
+
+    // JTAG ports (optional)
+    JtagTap? jtag;
+    if (enableJtag) {
+      final tck = addInput('tck', Logic());
+      final tms = addInput('tms', Logic());
+      final tdi = addInput('tdi', Logic());
+      final trst = addInput('trst', Logic());
+      addOutput('tdo');
+
+      jtag = JtagTap(tck, tms, tdi, trst);
+      output('tdo') <= jtag.tdo;
     }
 
     configReadPort = configReadPort.clone()
@@ -97,24 +113,35 @@ class AegisFPGA extends Module {
       configReadPort,
     );
 
-    configDone <= loader.done;
+    // When JTAG is enabled, a mux selects which source drives the config
+    // chain. The TAP's enableConfig output controls the switch.
+    final cfgIn = Logic(name: 'cfgIn');
+    final cfgLoad = Logic(name: 'cfgLoad');
+    final cfgReset = Logic(name: 'cfgReset');
+
+    if (jtag != null) {
+      cfgIn <= mux(jtag.enableConfig, jtag.cfgIn, loader.cfgIn);
+      cfgLoad <= mux(jtag.enableConfig, jtag.cfgLoad, loader.cfgLoad);
+      cfgReset <= reset | (jtag.enableConfig & jtag.cfgReset);
+      configDone <= loader.done;
+    } else {
+      cfgIn <= loader.cfgIn;
+      cfgLoad <= loader.cfgLoad;
+      cfgReset <= reset;
+      configDone <= loader.done;
+    }
 
     // Clock tiles - config chain: clock tiles -> IO fabric -> LUT fabric
     final clockTiles = <ClockTile>[];
-    var cfgChain = loader.cfgIn;
+    var cfgChainSig = cfgIn;
 
     for (int i = 0; i < clockTileCount; i++) {
       final tileCfgIn = Logic(name: 'clkCfgIn_$i');
-      tileCfgIn <= cfgChain;
+      tileCfgIn <= cfgChainSig;
 
-      final ct = ClockTile(
-        clk,
-        ~loader.done | reset,
-        tileCfgIn,
-        loader.cfgLoad,
-      );
+      final ct = ClockTile(clk, cfgReset, tileCfgIn, cfgLoad);
       clockTiles.add(ct);
-      cfgChain = ct.cfgOut;
+      cfgChainSig = ct.cfgOut;
     }
 
     // Collect clock outputs
@@ -134,7 +161,7 @@ class AegisFPGA extends Module {
     // IO fabric receives config chain after clock tiles
     final ioFabric = IOFabric(
       clk,
-      ~loader.done | reset,
+      cfgReset,
       width: width,
       height: height,
       tracks: tracks,
@@ -143,8 +170,8 @@ class AegisFPGA extends Module {
       bramDataWidth: bramDataWidth,
       bramAddrWidth: bramAddrWidth,
       dspColumnInterval: dspColumnInterval,
-      cfgIn: cfgChain,
-      cfgLoad: loader.cfgLoad,
+      cfgIn: cfgChainSig,
+      cfgLoad: cfgLoad,
       padIn: padIn,
       serialIn: serialIn,
     );
@@ -218,6 +245,7 @@ class AegisFPGA extends Module {
       ),
       'serdes': SerDesTile.descriptor(count: serdesCount),
       'clock': ClockTile.descriptor(count: clockTileCount),
+      if (enableJtag) 'jtag': JtagTap.descriptor(idcode: 0x00000001),
       'config': {
         'total_bits': totalBits,
         'chain_order': [

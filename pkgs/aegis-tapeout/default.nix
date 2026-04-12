@@ -95,6 +95,10 @@ lib.extendMkDerivation {
               w = 853;
               h = 132;
             };
+            JtagTap = {
+              w = 45;
+              h = 30;
+            };
           };
           sky130 = {
             # TODO: characterize tile sizes on sky130
@@ -125,6 +129,10 @@ lib.extendMkDerivation {
             SerDesTile = {
               w = 550;
               h = 85;
+            };
+            JtagTap = {
+              w = 30;
+              h = 20;
             };
           };
         }
@@ -245,6 +253,7 @@ lib.extendMkDerivation {
             "IOTile"
             "SerDesTile"
             "FabricConfigLoader"
+            "JtagTap"
           ]
       );
 

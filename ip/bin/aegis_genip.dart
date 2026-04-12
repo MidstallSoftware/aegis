@@ -19,6 +19,11 @@ ArgParser buildParser() {
       abbr: 'c',
       help: 'Adds a clock domain for tile configuration',
     )
+    ..addFlag(
+      'jtag',
+      abbr: 'j',
+      help: 'Adds a JTAG TAP controller for configuration and debug',
+    )
     ..addOption(
       'output',
       abbr: 'o',
@@ -115,6 +120,7 @@ Future<void> main(List<String> arguments) async {
       padIn: Logic(width: 2 * width + 2 * height),
       serialIn: Logic(width: serdesCount),
       configClk: results.flag('config-clk') ? Logic() : null,
+      enableJtag: results.flag('jtag'),
       configReadPort: DataPortInterface(
         int.parse(results.option('config-data-width') ?? '8'),
         int.parse(results.option('config-address-width') ?? '8'),
@@ -252,6 +258,7 @@ Future<void> main(List<String> arguments) async {
       bramColumnInterval: bramInterval,
       dspColumnInterval: dspInterval,
       hasConfigClk: results.flag('config-clk'),
+      hasJtag: results.flag('jtag'),
     );
     File(
       '$outputDir/${fpga.name}-openroad.tcl',

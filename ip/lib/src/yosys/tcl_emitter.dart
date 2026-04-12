@@ -23,6 +23,7 @@ class YosysTclEmitter {
     'IOTile',
     'SerDesTile',
     'FabricConfigLoader',
+    'JtagTap',
   ];
 
   /// Backward compat alias
