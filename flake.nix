@@ -80,74 +80,99 @@
             sky130-pdk = pkgs.callPackage ./pkgs/sky130-pdk { };
           };
 
-          packages = {
-            default = pkgs.aegis-ip-tools;
-            ip-tools = pkgs.aegis-ip-tools;
-            terra-1 = pkgs.aegis-ip-tools.mkIp {
-              deviceName = "terra_1";
-              width = 48;
-              height = 64;
-              tracks = 4;
-              serdesCount = 4;
-              bramColumnInterval = 16;
-              dspColumnInterval = 24;
-              clockTileCount = 2;
-            };
-            terra-1-tapeout = self.packages.${system}.terra-1.mkTapeout {
-              pdk = pkgs.gf180mcu-pdk;
-              clockPeriodNs = 20;
-            };
-            terra-1-deb = self.packages.${system}.terra-1.deb;
-            terra-1-docker = self.packages.${system}.terra-1.docker;
-          };
+          packages =
+            let
+              devices = import ./devices.nix {
+                inherit (pkgs) aegis-ip-tools gf180mcu-pdk sky130-pdk;
+              };
+
+              mkDevicePackages = name: cfg: {
+                "${name}" = cfg.ip;
+                "${name}-tapeout" = cfg.ip.mkTapeout cfg.tapeout;
+                "${name}-deb" = cfg.ip.deb;
+                "${name}-docker" = cfg.ip.docker;
+              };
+            in
+            {
+              default = pkgs.aegis-ip-tools;
+              ip-tools = pkgs.aegis-ip-tools;
+            }
+            // lib.foldl' (acc: name: acc // mkDevicePackages name devices.${name}) { } (
+              builtins.attrNames devices
+            );
 
           checks =
             let
-              terra-1 = self.packages.${system}.terra-1;
+              devices = builtins.filter (
+                name:
+                let
+                  pkg = self.packages.${system}.${name};
+                in
+                pkg ? deviceName && !(pkg ? tileMacros)
+              ) (builtins.attrNames self.packages.${system});
+              mkDeviceChecks =
+                name:
+                let
+                  ip = self.packages.${system}.${name};
+                  tapeout = self.packages.${system}."${name}-tapeout";
+                in
+                {
+                  "${name}-blinky" = pkgs.callPackage ./examples/blinky {
+                    aegis-ip = ip;
+                  };
+                  "${name}-blinky-sim" = pkgs.callPackage ./tests/blinky-sim {
+                    aegis-ip = ip;
+                  };
+                  "${name}-counter" = pkgs.callPackage ./tests/counter-verify {
+                    aegis-ip = ip;
+                  };
+                  "${name}-shift-register" = pkgs.callPackage ./tests/shift-register {
+                    aegis-ip = ip;
+                  };
+                  "${name}-logic-gates" = pkgs.callPackage ./tests/logic-gates {
+                    aegis-ip = ip;
+                  };
+                  "${name}-tile-bits" = pkgs.callPackage ./tests/tile-bits-consistency {
+                    aegis-ip = ip;
+                  };
+                  "${name}-synth-equiv-comb" = pkgs.callPackage ./tests/synth-equiv {
+                    aegis-ip = ip;
+                    design = "comb";
+                  };
+                  "${name}-synth-equiv-counter" = pkgs.callPackage ./tests/synth-equiv {
+                    aegis-ip = ip;
+                    design = "counter";
+                  };
+                  "${name}-formal-ip" = pkgs.callPackage ./tests/formal-ip {
+                    aegis-ip = ip;
+                  };
+                  "${name}-gds-verify" = pkgs.callPackage ./tests/gds-verify {
+                    aegis-tapeout = tapeout;
+                  };
+                };
+            in
+            lib.foldl' (acc: name: acc // mkDeviceChecks name) { } devices;
+
+          devShells =
+            let
+              devices = builtins.filter (
+                name:
+                let
+                  pkg = self.packages.${system}.${name};
+                in
+                pkg ? deviceName && !(pkg ? tileMacros)
+              ) (builtins.attrNames self.packages.${system});
+              mkDeviceShells = name: {
+                "${name}" = self.packages.${system}.${name}.shell;
+                "${name}-tapeout" = self.packages.${system}."${name}-tapeout".shell;
+                "${name}-blinky" = self.checks.${system}."${name}-blinky".shell;
+              };
             in
             {
-              terra-1-blinky = pkgs.callPackage ./examples/blinky {
-                aegis-ip = terra-1;
-              };
-              terra-1-blinky-sim = pkgs.callPackage ./tests/blinky-sim {
-                aegis-ip = terra-1;
-              };
-              terra-1-counter = pkgs.callPackage ./tests/counter-verify {
-                aegis-ip = terra-1;
-              };
-              terra-1-shift-register = pkgs.callPackage ./tests/shift-register {
-                aegis-ip = terra-1;
-              };
-              terra-1-logic-gates = pkgs.callPackage ./tests/logic-gates {
-                aegis-ip = terra-1;
-              };
-              # Formal verification checks
-              terra-1-tile-bits = pkgs.callPackage ./tests/tile-bits-consistency {
-                aegis-ip = terra-1;
-              };
-              terra-1-synth-equiv-comb = pkgs.callPackage ./tests/synth-equiv {
-                aegis-ip = terra-1;
-                design = "comb";
-              };
-              terra-1-synth-equiv-counter = pkgs.callPackage ./tests/synth-equiv {
-                aegis-ip = terra-1;
-                design = "counter";
-              };
-              terra-1-formal-ip = pkgs.callPackage ./tests/formal-ip {
-                aegis-ip = terra-1;
-              };
-              terra-1-gds-verify = pkgs.callPackage ./tests/gds-verify {
-                aegis-tapeout = self.packages.${system}.terra-1-tapeout;
-              };
-            };
-
-          devShells = {
-            default = pkgs.aegis-ip-tools.shell;
-            ip-tools = pkgs.aegis-ip-tools.shell;
-            terra-1 = self.packages.${system}.terra-1.shell;
-            terra-1-tapeout = self.packages.${system}.terra-1-tapeout.shell;
-            terra-1-blinky = self.checks.${system}.terra-1-blinky.shell;
-          };
+              default = pkgs.aegis-ip-tools.shell;
+              ip-tools = pkgs.aegis-ip-tools.shell;
+            }
+            // lib.foldl' (acc: name: acc // mkDeviceShells name) { } devices;
         };
     };
 }

@@ -20,9 +20,29 @@ foundry via open PDKs and shuttle services like
 
 ## Devices
 
+### Aegis Luna 1
+
+A compact Aegis device targeting GF180MCU via [wafer.space](https://wafer.space)
+(1x1 Full slot, 3.93 x 5.12mm die).
+
+| Resource          | Count         |
+|-------------------|---------------|
+| LUT4              | ~760          |
+| BRAM (128x8)      | 40 tiles      |
+| DSP18 (18x18 MAC) | 40 tiles      |
+| I/O pads          | 118           |
+| SerDes            | 1             |
+| Clock tiles       | 1 (4 outputs) |
+| Routing tracks    | 1 per edge    |
+
+```bash
+nix build .#luna-1          # Generate IP (SV, JSON, chipdb, techmap)
+nix build .#luna-1-tapeout  # Full RTL-to-GDS for fab submission
+```
+
 ### Aegis Terra 1
 
-The first Aegis device, targeting GF180MCU via [wafer.space](https://wafer.space).
+A larger Aegis device targeting Sky130.
 
 | Resource          | Count         |
 |-------------------|---------------|
