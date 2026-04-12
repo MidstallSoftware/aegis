@@ -101,7 +101,11 @@ class OpenroadTileTclEmitter {
     buf.writeln();
 
     // Placement
-    buf.writeln('global_placement -density \$TILE_UTIL');
+    buf.writeln(
+      'if {![info exists TILE_PLACEMENT_DENSITY]} '
+      '{ set TILE_PLACEMENT_DENSITY \$TILE_UTIL }',
+    );
+    buf.writeln('global_placement -density \$TILE_PLACEMENT_DENSITY');
     buf.writeln('detailed_placement');
     buf.writeln();
 

@@ -592,7 +592,10 @@ class OpenroadTclEmitter {
 
     // Then place remaining standard cells (glue logic)
     buf.writeln('# Place remaining standard cells');
-    buf.writeln('global_placement -density \$UTILIZATION');
+    buf.writeln(
+      'if {![info exists PLACEMENT_DENSITY]} { set PLACEMENT_DENSITY 0.1 }',
+    );
+    buf.writeln('global_placement -density \$PLACEMENT_DENSITY');
     buf.writeln('detailed_placement');
     buf.writeln();
   }
@@ -642,7 +645,10 @@ class OpenroadTclEmitter {
       '# Detailed route may fail on offgrid pin shapes from place_pins.',
     );
     buf.writeln('# If it fails, we still have the global-routed DEF.');
-    buf.writeln('detailed_route');
+    buf.writeln(
+      'if {![info exists DROUTE_END_ITER]} { set DROUTE_END_ITER 8 }',
+    );
+    buf.writeln('detailed_route -droute_end_iter \$DROUTE_END_ITER');
     buf.writeln();
   }
 

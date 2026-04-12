@@ -26,6 +26,9 @@ lib.extendMkDerivation {
     "gridMarginUm"
     "tileUtilization"
     "tileDieSizes"
+    "tilePlacementDensities"
+    "topPlacementDensity"
+    "topDetailedRouteIter"
   ];
 
   extendDrvArgs =
@@ -42,6 +45,9 @@ lib.extendMkDerivation {
       gridMarginUm ? 20,
       tileUtilization ? 0.85,
       tileDieSizes ? { },
+      tilePlacementDensities ? { },
+      topPlacementDensity ? 0.1,
+      topDetailedRouteIter ? 8,
       ...
     }@args:
 
@@ -186,6 +192,9 @@ lib.extendMkDerivation {
               set TILE_DIE_W ${toString effectiveTileDieSizes.${tileModule}.w}
               set TILE_DIE_H ${toString effectiveTileDieSizes.${tileModule}.h}
             ''}
+            ${lib.optionalString (builtins.hasAttr tileModule tilePlacementDensities) ''
+              set TILE_PLACEMENT_DENSITY ${toString tilePlacementDensities.${tileModule}}
+            ''}
             source ${aegis-ip}/${deviceName}-openroad-${tileModule}.tcl
             EOF
             openroad -threads $NIX_BUILD_CORES -exit pnr.tcl 2>&1 | tee openroad.log
@@ -318,6 +327,8 @@ lib.extendMkDerivation {
           set CELL_LIB "${cellLib}"
           set MACRO_HALO ${toString macroHaloUm}
           set GRID_MARGIN ${toString gridMarginUm}
+          set PLACEMENT_DENSITY ${toString topPlacementDensity}
+          set DROUTE_END_ITER ${toString topDetailedRouteIter}
           ${lib.optionalString (dieWidthUm != null && dieHeightUm != null) ''
             set DIE_AREA "0 0 ${toString dieWidthUm} ${toString dieHeightUm}"
           ''}
@@ -352,6 +363,9 @@ lib.extendMkDerivation {
       "gridMarginUm"
       "tileUtilization"
       "tileDieSizes"
+      "tilePlacementDensities"
+      "topPlacementDensity"
+      "topDetailedRouteIter"
     ]
     // {
       inherit name;
@@ -461,6 +475,9 @@ lib.extendMkDerivation {
           gridMarginUm
           tileUtilization
           tileDieSizes
+          tilePlacementDensities
+          topPlacementDensity
+          topDetailedRouteIter
           tileMacros
           topSynth
           topPnr
