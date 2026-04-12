@@ -14,6 +14,7 @@ class OpenroadTclEmitter {
   final int bramColumnInterval;
   final int dspColumnInterval;
   final bool hasConfigClk;
+  final bool hasJtag;
 
   int get totalPads => 2 * width + 2 * height;
 
@@ -34,6 +35,7 @@ class OpenroadTclEmitter {
     this.bramColumnInterval = 0,
     this.dspColumnInterval = 0,
     this.hasConfigClk = false,
+    this.hasJtag = false,
     this.macroHaloUm = 100,
     this.gridMarginUm = 200,
   });
@@ -234,6 +236,9 @@ class OpenroadTclEmitter {
       'configRead_addr\\[*\\]',
       'configRead_data\\[*\\]',
     ]);
+    if (hasJtag) {
+      westPins.addAll(['tck', 'tms', 'tdi', 'tdo', 'trst']);
+    }
 
     final eastPins = <String>[];
     if (serdesCount > 0) {
@@ -562,7 +567,7 @@ class OpenroadTclEmitter {
     buf.writeln('    # Place Clock and ConfigLoader on right edge');
     buf.writeln('    set edge_x [expr {\$die_w - \$margin}]');
     buf.writeln('    set edge_y \$margin');
-    buf.writeln('    foreach type {ClockTile FabricConfigLoader} {');
+    buf.writeln('    foreach type {ClockTile FabricConfigLoader JtagTap} {');
     buf.writeln('        if {[info exists macro_groups(\$type)]} {');
     buf.writeln('            foreach inst \$macro_groups(\$type) {');
     buf.writeln(

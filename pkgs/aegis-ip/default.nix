@@ -30,6 +30,7 @@ lib.extendMkDerivation {
     "configClk"
     "configDataWidth"
     "configAddressWidth"
+    "enableJtag"
   ];
 
   extendDrvArgs =
@@ -47,6 +48,7 @@ lib.extendMkDerivation {
       configClk ? false,
       configDataWidth ? 8,
       configAddressWidth ? 8,
+      enableJtag ? false,
       ...
     }@args:
 
@@ -82,6 +84,7 @@ lib.extendMkDerivation {
         config-clk = configClk;
         config-data-width = configDataWidth;
         config-address-width = configAddressWidth;
+        jtag = enableJtag;
       };
     in
     builtins.removeAttrs args [
@@ -96,6 +99,7 @@ lib.extendMkDerivation {
       "configClk"
       "configDataWidth"
       "configAddressWidth"
+      "enableJtag"
     ]
     // {
       inherit name;
@@ -161,6 +165,7 @@ lib.extendMkDerivation {
           configClk
           configDataWidth
           configAddressWidth
+          enableJtag
           ;
         mkTapeout = callPackage ../aegis-tapeout { aegis-ip = finalAttrs.finalPackage; };
         shell = mkShell {

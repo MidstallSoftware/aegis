@@ -11,6 +11,7 @@ export 'components/digital/fabric_config_loader.dart';
 export 'components/digital/fpga.dart';
 export 'components/digital/io_fabric.dart';
 export 'components/digital/io_tile.dart';
+export 'components/digital/jtag_tap.dart';
 export 'components/digital/lut4.dart';
 export 'components/digital/serdes_tile.dart';
 export 'components/digital/tile.dart';
