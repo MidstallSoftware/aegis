@@ -1,0 +1,182 @@
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - v?[0-9]+.[0-9]+.[0-9]+*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      manifests: ${{ steps.discover.outputs.manifests }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
+      - id: discover
+        run: |
+          flake_json=$(nix flake show --all-systems --json 2>/dev/null)
+
+          matrix=$(echo "$flake_json" | jq -c '[.inventory.packages.output.children
+            | to_entries[]
+            | .key as $sys
+            | .value.children
+            | keys[]
+            | select(endswith("-docker"))
+            | {system: $sys, package: .}]')
+
+          manifests=$(echo "$flake_json" | jq -c '[.inventory.packages.output.children
+            | to_entries[]
+            | .key as $sys
+            | .value.children
+            | keys[]
+            | select(endswith("-docker"))
+            | {system: $sys, package: .}]
+            | group_by(.package)
+            | map({package: .[0].package, systems: [.[].system]})')
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "manifests=$manifests" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: discover
+    runs-on: ${{ matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
+
+      - name: Build Docker image
+        run: nix build '.#packages.${{ matrix.system }}.${{ matrix.package }}' -o result
+
+      - name: Determine image metadata
+        id: meta
+        run: |
+          name=$(nix eval --raw '.#packages.${{ matrix.system }}.${{ matrix.package }}.imageName')
+          tag=$(nix eval --raw '.#packages.${{ matrix.system }}.${{ matrix.package }}.imageTag')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name == 'push'
+        run: |
+          repo="ghcr.io/${{ github.repository_owner }}/${{ steps.meta.outputs.name }}"
+          repo="${repo,,}"
+          sha="${GITHUB_SHA::7}"
+
+          docker load < result
+          loaded="${{ steps.meta.outputs.name }}:${{ steps.meta.outputs.tag }}"
+
+          # Always push the system-specific tag (used by manifest job)
+          docker tag "$loaded" "$repo:${{ matrix.system }}"
+          docker push "$repo:${{ matrix.system }}"
+
+          # Push SHA-tagged per-arch image
+          docker tag "$loaded" "$repo:${{ matrix.system }}-$sha"
+          docker push "$repo:${{ matrix.system }}-$sha"
+
+          # Push version-tagged per-arch image on tag events
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            vtag="${GITHUB_REF#refs/tags/}"
+            docker tag "$loaded" "$repo:${{ matrix.system }}-$vtag"
+            docker push "$repo:${{ matrix.system }}-$vtag"
+          fi
+
+  manifest:
+    if: github.event_name == 'push'
+    needs: [discover, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.manifests) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
+
+      - name: Determine image name
+        id: meta
+        run: |
+          name=$(nix eval --raw '.#packages.${{ matrix.systems[0] }}.${{ matrix.package }}.imageName')
+          repo="ghcr.io/${{ github.repository_owner }}/$name"
+          echo "repo=${repo,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          repo="${{ steps.meta.outputs.repo }}"
+          systems='${{ toJson(matrix.systems) }}'
+          sha="${GITHUB_SHA::7}"
+
+          args=()
+          annotations=()
+          for sys in $(echo "$systems" | jq -r '.[]'); do
+            args+=("$repo:$sys")
+            arch="${sys%%-*}"
+            case "$arch" in
+              x86_64)  docker_arch="amd64" ;;
+              aarch64) docker_arch="arm64" ;;
+              *)       docker_arch="$arch" ;;
+            esac
+            annotations+=("$repo:$sys --os linux --arch $docker_arch")
+          done
+
+          # latest manifest
+          docker manifest create "$repo:latest" "${args[@]}"
+          for ann in "${annotations[@]}"; do
+            docker manifest annotate "$repo:latest" $ann
+          done
+          docker manifest push "$repo:latest"
+
+          # SHA manifest
+          docker manifest create "$repo:$sha" "${args[@]}"
+          for ann in "${annotations[@]}"; do
+            docker manifest annotate "$repo:$sha" $ann
+          done
+          docker manifest push "$repo:$sha"
+
+          # Version tag manifest
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            vtag="${GITHUB_REF#refs/tags/}"
+            docker manifest create "$repo:$vtag" "${args[@]}"
+            for ann in "${annotations[@]}"; do
+              docker manifest annotate "$repo:$vtag" $ann
+            done
+            docker manifest push "$repo:$vtag"
+          fi
