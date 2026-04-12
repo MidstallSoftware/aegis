@@ -74,7 +74,9 @@ ls result/
 
 Supports GF180MCU (wafer.space) and Sky130 PDKs.
 
-## Building
+## Installation
+
+### Nix (recommended)
 
 Requires [Nix](https://nixos.org/) with flakes enabled.
 
@@ -90,6 +92,44 @@ nix build .#checks.$(nix eval --raw nixpkgs#system).terra-1-blinky
 
 # Enter development shell
 nix develop
+```
+
+### Docker
+
+Pre-built multi-arch images are available from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/midstall/aegis-terra_1:latest
+
+# Run with your design directory mounted
+docker run -v $(pwd):/workspace -it ghcr.io/midstall/aegis-terra_1:latest
+```
+
+Images are tagged by git SHA and release version (e.g. `:v1.0.0`).
+
+To build locally with Nix:
+
+```bash
+nix build .#terra-1-docker
+docker load < result
+```
+
+### Debian/Ubuntu
+
+Download `.deb` packages from [GitHub Releases](https://github.com/MidstallSoftware/aegis/releases) (amd64 and arm64):
+
+```bash
+sudo dpkg -i aegis-terra-1_*.deb
+```
+
+This installs `aegis-pack`, `aegis-sim`, `nextpnr-generic`, device-specific
+wrappers (`terra_1-sim`, `terra_1-pack`, `nextpnr-aegis-terra_1`), and support
+files under `/usr/share/aegis/`.
+
+To build locally with Nix:
+
+```bash
+nix build .#terra-1-deb
 ```
 
 ## Architecture
