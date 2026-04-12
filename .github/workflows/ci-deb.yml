@@ -1,0 +1,86 @@
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - v?[0-9]+.[0-9]+.[0-9]+*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
+      - id: discover
+        run: |
+          flake_json=$(nix flake show --all-systems --json 2>/dev/null)
+
+          matrix=$(echo "$flake_json" | jq -c '[.inventory.packages.output.children
+            | to_entries[]
+            | .key as $sys
+            | .value.children
+            | keys[]
+            | select(endswith("-deb"))
+            | {system: $sys, package: .}]')
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    runs-on: ${{ matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
+
+      - name: Build .deb package
+        run: nix build '.#packages.${{ matrix.system }}.${{ matrix.package }}' -o result
+
+      - name: Determine .deb filename
+        id: meta
+        run: |
+          deb=$(basename "$(readlink result)")
+          cp result "$deb"
+          echo "filename=$deb" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-${{ matrix.system }}
+          path: ${{ steps.meta.outputs.filename }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: debs
+          merge-multiple: true
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: debs/*.deb

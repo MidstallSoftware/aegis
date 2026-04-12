@@ -174,6 +174,7 @@ lib.extendMkDerivation {
             surfer
           ];
         };
+        deb = callPackage ./deb.nix { aegis-ip = finalAttrs.finalPackage; };
         docker = dockerTools.buildLayeredImage {
           name = "aegis-${deviceName}";
           tag = "latest";

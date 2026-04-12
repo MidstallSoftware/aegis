@@ -97,6 +97,7 @@
               pdk = pkgs.gf180mcu-pdk;
               clockPeriodNs = 20;
             };
+            terra-1-deb = self.packages.${system}.terra-1.deb;
             terra-1-docker = self.packages.${system}.terra-1.docker;
           };
 
