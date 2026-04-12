@@ -14,6 +14,8 @@ class YosysTechmapEmitter {
   final int bramColumnInterval;
 
   int get bramDepth => 1 << bramAddrWidth;
+  final bool hasJtag;
+
   int get totalLuts => width * height;
 
   const YosysTechmapEmitter({
@@ -24,6 +26,7 @@ class YosysTechmapEmitter {
     this.bramDataWidth = 8,
     this.bramAddrWidth = 7,
     this.bramColumnInterval = 0,
+    this.hasJtag = false,
   });
 
   /// Generate Verilog blackbox cell definitions for Aegis primitives.
@@ -39,6 +42,9 @@ class YosysTechmapEmitter {
     _writeCarryCell(buf);
     if (bramColumnInterval > 0) {
       _writeBramCell(buf);
+    }
+    if (hasJtag) {
+      _writeJtagCell(buf);
     }
 
     return buf.toString();
@@ -285,6 +291,20 @@ class YosysTechmapEmitter {
   void _writeBramMap(StringBuffer buf) {
     buf.writeln('// BRAM inference is handled by a separate .rules file');
     buf.writeln('// passed to memory_bram -rules in the synth script.');
+    buf.writeln();
+  }
+
+  void _writeJtagCell(StringBuffer buf) {
+    buf.writeln('(* blackbox *)');
+    buf.writeln('module AEGIS_JTAG (');
+    buf.writeln('    output wire tdi,');
+    buf.writeln('    input  wire tdo,');
+    buf.writeln('    output wire shift,');
+    buf.writeln('    output wire update,');
+    buf.writeln('    output wire capture,');
+    buf.writeln('    output wire reset');
+    buf.writeln(');');
+    buf.writeln('endmodule');
     buf.writeln();
   }
 }
