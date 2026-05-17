@@ -2,6 +2,7 @@
   lib,
   stdenv,
   mkShell,
+  python3,
   yosys,
   openroad,
   xschem,
@@ -51,7 +52,7 @@ lib.extendMkDerivation {
       tileDieSizes ? { },
       tilePlacementDensities ? { },
       topPlacementDensity ? 0.1,
-      topDetailedRouteIter ? 8,
+      topDetailedRouteIter ? 16,
       tileLayerAdjustments ? pdk.tileLayerAdjustments or { },
       topLayerAdjustments ? pdk.topLayerAdjustments or { },
       ...
@@ -127,16 +128,21 @@ lib.extendMkDerivation {
               h = 42;
             };
             FabricConfigLoader = {
-              w = 30;
-              h = 12;
+              # Sized large enough that the top-level PDN can drop a
+              # full M5->M4->M3->M2->M1 via stack onto its M1 power pins
+              # without colliding with the macro's internal routing.
+              w = 100;
+              h = 80;
             };
             SerDesTile = {
               w = 950;
               h = 160;
             };
             JtagTap = {
-              w = 45;
-              h = 30;
+              # Same rationale as FabricConfigLoader: needs enough area
+              # for the top-level PDN via stack to land cleanly.
+              w = 80;
+              h = 60;
             };
           };
           sky130 = {
@@ -245,6 +251,20 @@ lib.extendMkDerivation {
             ${lib.concatStringsSep "\n" (
               lib.mapAttrsToList (layer: adj: "set LAYER_ADJ(${layer}) ${toString adj}") tileLayerAdjustments
             )}
+            ${lib.optionalString (pdk ? pdn) (
+              let
+                pdn = pdk.pdn;
+              in
+              ''
+                set PDN_RAIL_LAYER "${pdn.railLayer}"
+                set PDN_RAIL_WIDTH ${toString pdn.railWidth}
+                set PDN_VERTICAL_LAYER "${pdn.verticalLayer}"
+                set PDN_VWIDTH ${toString pdn.verticalWidth}
+                set PDN_VPITCH ${toString pdn.verticalPitch}
+                set PDN_VOFFSET ${toString pdn.verticalOffset}
+                set PDN_VSPACING ${toString pdn.verticalSpacing}
+              ''
+            )}
             source ${aegis-ip}/${deviceName}-openroad-${tileModule}.tcl
             EOF
             openroad -threads $NIX_BUILD_CORES -exit pnr.tcl 2>&1 | tee openroad.log
@@ -275,6 +295,8 @@ lib.extendMkDerivation {
             cp ${deviceName}_${tileModule}.lib $out/ 2>/dev/null || true
             cp ${tileModule}_timing.rpt $out/ 2>/dev/null || true
             cp ${tileModule}_area.rpt $out/ 2>/dev/null || true
+            cp ${tileModule}_antenna.rpt $out/ 2>/dev/null || true
+            cp ${tileModule}_antenna_pre.rpt $out/ 2>/dev/null || true
             cp yosys.log $out/ 2>/dev/null || true
             cp openroad.log $out/ 2>/dev/null || true
             runHook postInstall
@@ -300,13 +322,23 @@ lib.extendMkDerivation {
           ]
       );
 
+      chipModule = "${deviceName}_chip";
+      ioLibsRef = "${pdkPath}/libs.ref/${pdk.ioLib}";
+      ioVerilog = "${ioLibsRef}/verilog/${pdk.ioLib}__blackbox.v";
+      # Typical-corner liberty for the IO pad cells. Picking the 5V
+      # variant since that matches the 5v0 standard-cell voltage.
+      ioLibFile = "${ioLibsRef}/lib/${pdk.ioLib}__tt_025C_5v00.lib";
+
       topSynth = stdenv.mkDerivation {
         name = "aegis-top-synth-${deviceName}";
 
         dontUnpack = true;
         dontConfigure = true;
 
-        nativeBuildInputs = [ yosys ];
+        nativeBuildInputs = [
+          yosys
+          (python3.withPackages (_: [ ]))
+        ];
 
         buildPhase = ''
           runHook preBuild
@@ -316,14 +348,53 @@ lib.extendMkDerivation {
             LIB_FILE=$(find ${libFile} -name '*.lib' -print -quit)
           fi
 
-          echo "=== Top-level assembly ==="
+          echo "=== Generate chip-level wrapper with padring ==="
+          IN_SV="${aegis-ip}/${deviceName}.sv" \
+          OUT_SV="${deviceName}_chip.sv" \
+          CORE_MODULE=AegisFPGA \
+          CHIP_MODULE=${chipModule} \
+          PAD_BIDIR="${pdk.padCells.signalPad}" \
+          PAD_INPUT="${pdk.padCells.inputPad}" \
+          PAD_VDD="${pdk.padCells.powerPad}" \
+          PAD_VSS="${pdk.padCells.groundPad}" \
+          POWER_PAD_PER_SIDE=2 \
+          python3 ${./scripts/gen_chip_wrapper.py}
+
+          echo "=== Top-level assembly + chip wrapper ==="
           cat > synth.tcl << EOF
-          set SV_FILE "${aegis-ip}/${deviceName}.sv"
-          set LIB_FILE "$LIB_FILE"
-          set CELL_LIB "${cellLib}"
-          set DEVICE_NAME "${deviceName}"
-          set STUBS_V "${aegis-ip}/${deviceName}_tile_stubs.v"
-          source ${aegis-ip}/${deviceName}-yosys.tcl
+          # Read core, chip wrapper, tile stubs, and I/O pad blackbox views.
+          yosys read_verilog -sv ${aegis-ip}/${deviceName}.sv
+          yosys read_verilog -sv ${deviceName}_chip.sv
+          # Drop tile bodies and replace with blackbox stubs (same pattern as
+          # ${aegis-ip}/${deviceName}-yosys.tcl).
+          yosys delete Tile
+          yosys delete BramTile
+          yosys delete DspBasicTile
+          yosys delete ClockTile
+          yosys delete IOTile
+          yosys delete SerDesTile
+          yosys delete FabricConfigLoader
+          yosys delete JtagTap
+          yosys read_verilog -sv ${aegis-ip}/${deviceName}_tile_stubs.v
+          # Pad-cell blackbox declarations from the I/O library.
+          yosys read_verilog -sv ${ioVerilog}
+          yosys read_liberty -lib $LIB_FILE
+          # I/O pad liberty so the chip wrapper has timing models for pads.
+          yosys read_liberty -lib ${ioLibFile}
+          yosys hierarchy -top ${chipModule}
+          yosys proc
+          yosys techmap
+          # Flatten the AegisFPGA wrapper so tile macros become direct
+          # children of the chip wrapper. The OpenROAD placement code
+          # walks getInsts at the top block expecting tiles there.
+          yosys flatten
+          yosys dfflibmap -liberty $LIB_FILE
+          yosys abc -liberty $LIB_FILE
+          yosys hilomap -hicell ${cellLib}__tieh Z -locell ${cellLib}__tiel ZN
+          yosys opt_clean -purge
+          yosys check
+          yosys write_verilog -noattr -noexpr ${deviceName}_synth.v
+          yosys stat -liberty $LIB_FILE
           EOF
           yosys -c synth.tcl 2>&1 | tee yosys.log
 
@@ -334,6 +405,7 @@ lib.extendMkDerivation {
           runHook preInstall
           mkdir -p $out
           cp ${deviceName}_synth.v $out/ 2>/dev/null || true
+          cp ${deviceName}_chip.sv $out/ 2>/dev/null || true
           cp yosys.log $out/ 2>/dev/null || true
           runHook postInstall
         '';
@@ -362,21 +434,35 @@ lib.extendMkDerivation {
             cp ${tileMacros.${mod}}/${deviceName}_${mod}.lib . 2>/dev/null || true
           '') (builtins.attrNames tileMacros)}
 
+          # Clock comes from the receiver Y pin of the clk input pad. The
+          # chip wrapper has no signal ports (bond pads are the only
+          # external boundary for signals) so we cannot reference a
+          # top-level port here.
           cat > constraints.sdc << EOF
-          create_clock [get_ports clk] -name clk -period ${toString clockPeriodNs}
+          create_clock [get_pins u_pad_clk/Y] -name clk -period ${toString clockPeriodNs}
           EOF
 
-          echo "=== Top-level PnR (macro-based) ==="
+          echo "=== Top-level PnR (macro-based, with padring) ==="
           cat > pnr.tcl << OPENROAD_EOF
           set LIB_FILE "$LIB_FILE"
           set TECH_LEF "$TECH_LEF"
           set CELL_LEF_DIR "${techLefDir}"
+          set IO_LEF_DIR "${ioLibsRef}/lef"
+          set IO_LIB_FILE "${ioLibFile}"
           set SYNTH_V "${topSynth}/${deviceName}_synth.v"
           set SDC_FILE "constraints.sdc"
           set DEVICE_NAME "${deviceName}"
+          set TOP_MODULE "${chipModule}"
           set SITE_NAME "${pdk.siteName}"
           set UTILIZATION ${toString coreUtilization}
           set CELL_LIB "${cellLib}"
+          set IO_LIB "${pdk.ioLib}"
+          set PAD_BIDIR "${pdk.padCells.signalPad}"
+          set PAD_VDD_CELL "${pdk.padCells.powerPad}"
+          set PAD_VSS_CELL "${pdk.padCells.groundPad}"
+          set PAD_CORNER "${pdk.padCells.cornerCell}"
+          set PAD_HEIGHT ${toString pdk.padCells.padHeight}
+          set CORNER_SIZE ${toString pdk.padCells.cornerSize}
           set MACRO_HALO ${toString macroHaloUm}
           set GRID_MARGIN ${toString gridMarginUm}
           set PLACEMENT_DENSITY ${toString topPlacementDensity}
@@ -386,6 +472,26 @@ lib.extendMkDerivation {
           ''}
           ${lib.concatStringsSep "\n" (
             lib.mapAttrsToList (layer: adj: "set LAYER_ADJ(${layer}) ${toString adj}") topLayerAdjustments
+          )}
+          ${lib.optionalString (pdk ? pdn) (
+            let
+              pdn = pdk.pdn;
+            in
+            ''
+              set PDN_RAIL_LAYER "${pdn.railLayer}"
+              set PDN_RAIL_WIDTH ${toString pdn.railWidth}
+              set PDN_VERTICAL_LAYER "${pdn.verticalLayer}"
+              set PDN_VWIDTH ${toString pdn.verticalWidth}
+              set PDN_VPITCH ${toString pdn.verticalPitch}
+              set PDN_VOFFSET ${toString pdn.verticalOffset}
+              set PDN_VSPACING ${toString pdn.verticalSpacing}
+              set PDN_HORIZONTAL_LAYER "${pdn.horizontalLayer}"
+              set PDN_HWIDTH ${toString pdn.horizontalWidth}
+              set PDN_HPITCH ${toString pdn.horizontalPitch}
+              set PDN_HOFFSET ${toString pdn.horizontalOffset}
+              set PDN_HSPACING ${toString pdn.horizontalSpacing}
+              set PDN_HALO ${toString pdn.halo}
+            ''
           )}
           source ${aegis-ip}/${deviceName}-openroad.tcl
           OPENROAD_EOF
@@ -402,6 +508,8 @@ lib.extendMkDerivation {
           cp timing.rpt $out/ 2>/dev/null || true
           cp area.rpt $out/ 2>/dev/null || true
           cp power.rpt $out/ 2>/dev/null || true
+          cp antenna.rpt $out/ 2>/dev/null || true
+          cp antenna_pre.rpt $out/ 2>/dev/null || true
           cp openroad.log $out/ 2>/dev/null || true
           runHook postInstall
         '';
@@ -478,7 +586,7 @@ lib.extendMkDerivation {
             echo "=== Fab finalize ==="
 
             GDS_FILE="${deviceName}.gds" \
-            TOP_CELL="AegisFPGA" \
+            TOP_CELL="${chipModule}" \
             ${
               lib.optionalString (effectiveDieWidthUm != null) ''DIE_W_UM="${toString effectiveDieWidthUm}"''
             } \
@@ -515,18 +623,13 @@ lib.extendMkDerivation {
 
               # Clean up orphan fill cells created by the filler
               GDS_FILE="${deviceName}.gds" \
-              TOP_CELL="AegisFPGA" \
+              TOP_CELL="${chipModule}" \
               QT_QPA_PLATFORM=offscreen \
               klayout -b -r ${./scripts/fab_finalize.py} \
                 2>&1 | tee -a klayout.log
             else
               echo "NOTE: Fill script not found, skipping density fill"
             fi
-
-            # DRC repair is available as a separate step:
-            #   klayout -b -r scripts/drc_repair.py -rd input=luna_1.gds -rd output=luna_1_repaired.gds
-            # It flattens Metal1 and merges close shapes (1458->55 M1.2a violations).
-            # Not run in the build because flat Metal1 makes subsequent DRC checks very slow.
 
             echo "=== Render layout image ==="
 
@@ -567,6 +670,8 @@ lib.extendMkDerivation {
         cp ${topPnr}/timing.rpt $out/ 2>/dev/null || true
         cp ${topPnr}/area.rpt $out/ 2>/dev/null || true
         cp ${topPnr}/power.rpt $out/ 2>/dev/null || true
+        cp ${topPnr}/antenna.rpt $out/ 2>/dev/null || true
+        cp ${topPnr}/antenna_pre.rpt $out/ 2>/dev/null || true
 
         # GDS
         cp ${deviceName}.gds $out/ 2>/dev/null || true
@@ -595,7 +700,9 @@ lib.extendMkDerivation {
           tileMacros
           topSynth
           topPnr
+          chipModule
           ;
+        topCellName = chipModule;
         inherit (aegis-ip)
           deviceName
           width

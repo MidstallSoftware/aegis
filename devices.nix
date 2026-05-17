@@ -23,12 +23,12 @@
   luna-1 = {
     ip = aegis-ip-tools.mkIp {
       deviceName = "luna_1";
-      width = 19;
-      height = 40;
+      width = 23;
+      height = 23;
       tracks = 1;
-      serdesCount = 1;
-      bramColumnInterval = 9;
-      dspColumnInterval = 10;
+      serdesCount = 0;
+      bramColumnInterval = 7;
+      dspColumnInterval = 8;
       clockTileCount = 1;
     };
     tapeout = {
