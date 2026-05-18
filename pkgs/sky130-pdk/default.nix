@@ -32,7 +32,11 @@ stdenvNoCC.mkDerivation {
     local sc=$out/share/pdk/sky130/libs.ref/sky130_fd_sc_hd
     mkdir -p $sc/{lib,lef,gds,verilog,spice}
 
-    # Tech LEF files
+    for f in ${fd_sc_hd}/tech/*.tlef; do
+      cp "$f" $sc/lef/
+      cp "$f" "$sc/lef/$(basename "$f" .tlef).lef"
+    done
+
     find ${fd_sc_hd}/tech -name '*.lef' -exec cp -n {} $sc/lef/ \; 2>/dev/null || true
 
     # Cell files
@@ -55,9 +59,57 @@ stdenvNoCC.mkDerivation {
     siteName = "unithd";
     pdkName = "sky130";
     pdkPath = "share/pdk/sky130";
+    techLef = "sky130_fd_sc_hd.tlef";
     commentLayer = {
       layer = 236;
       datatype = 0;
+    };
+    # LEF layer name -> GDS layer/datatype mapping for KLayout DEF->GDS
+    lefGdsLayers = {
+      li1 = {
+        layer = 67;
+        datatype = 20;
+      };
+      mcon = {
+        layer = 67;
+        datatype = 44;
+      };
+      met1 = {
+        layer = 68;
+        datatype = 20;
+      };
+      via = {
+        layer = 68;
+        datatype = 44;
+      };
+      met2 = {
+        layer = 69;
+        datatype = 20;
+      };
+      via2 = {
+        layer = 69;
+        datatype = 44;
+      };
+      met3 = {
+        layer = 70;
+        datatype = 20;
+      };
+      via3 = {
+        layer = 70;
+        datatype = 44;
+      };
+      met4 = {
+        layer = 71;
+        datatype = 20;
+      };
+      via4 = {
+        layer = 71;
+        datatype = 44;
+      };
+      met5 = {
+        layer = 72;
+        datatype = 20;
+      };
     };
   };
 

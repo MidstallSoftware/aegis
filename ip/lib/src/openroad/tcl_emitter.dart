@@ -46,9 +46,11 @@ class OpenroadTclEmitter {
     _writeHeader(buf);
     _writeReadInputs(buf);
     _writeFloorplan(buf);
+    _writePadring(buf);
     _writePinPlacement(buf);
     _writePowerGrid(buf);
     _writePlacement(buf);
+    _writePdnGen(buf);
     _writeCts(buf);
     _writeRouting(buf);
     _writeReports(buf);
@@ -100,6 +102,19 @@ class OpenroadTclEmitter {
     buf.writeln('    }');
     buf.writeln('}');
     buf.writeln();
+    // Read I/O pad library LEFs (gf180mcu_fd_io: bidir/input/output pads,
+    // power pads, padring fillers, corner cell). Only relevant when the
+    // chip-level wrapper is being placed; tile-level builds don't supply
+    // IO_LEF_DIR.
+    buf.writeln('if {[info exists IO_LEF_DIR]} {');
+    buf.writeln('    foreach lef [glob -directory \$IO_LEF_DIR *.lef] {');
+    buf.writeln('        read_lef \$lef');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln('if {[info exists IO_LIB_FILE]} {');
+    buf.writeln('    read_liberty \$IO_LIB_FILE');
+    buf.writeln('}');
+    buf.writeln();
 
     // Read tile macro LEFs and liberty timing models
     buf.writeln('# Read tile macro LEF abstracts and timing models');
@@ -114,8 +129,19 @@ class OpenroadTclEmitter {
     buf.writeln();
 
     buf.writeln('read_verilog \$SYNTH_V');
-    buf.writeln('link_design $moduleName');
+    buf.writeln(
+      'if {![info exists TOP_MODULE]} { set TOP_MODULE $moduleName }',
+    );
+    buf.writeln('link_design \$TOP_MODULE');
     buf.writeln('read_sdc \$SDC_FILE');
+    buf.writeln();
+    // Wire RC values are required by CTS, repair_design, and the global
+    // router's parasitic estimator. Use explicit numeric values rather
+    // than -layer so every routing/clock net has a defined R+C the
+    // estimator can fall back on, avoiding segfaults inside layerRC
+    // when the router asks about a layer we did not parameterize.
+    buf.writeln('set_wire_rc -signal -resistance 0.0001 -capacitance 0.0001');
+    buf.writeln('set_wire_rc -clock -resistance 0.0001 -capacitance 0.0001');
     buf.writeln();
   }
 
@@ -124,12 +150,23 @@ class OpenroadTclEmitter {
 
     // Compute die area from macro sizes if available
     buf.writeln('# Determine die area: use explicit setting, or compute from');
-    buf.writeln('# tile macro dimensions × grid size');
+    buf.writeln('# tile macro dimensions × grid size.');
+    buf.writeln(
+      '# When PAD_HEIGHT is set we are doing chip-level integration:',
+    );
+    buf.writeln('# the core area is inset from the die boundary by PAD_HEIGHT');
+    buf.writeln(
+      '# on every side so the perimeter is reserved for the padring.',
+    );
     buf.writeln('if {[info exists DIE_AREA]} {');
+    buf.writeln(
+      '    set _core_inset '
+      '[expr {[info exists PAD_HEIGHT] ? \$PAD_HEIGHT : 1}]',
+    );
     buf.writeln('    initialize_floorplan \\');
     buf.writeln('        -die_area \$DIE_AREA \\');
     buf.writeln(
-      '        -core_area "[expr {[lindex \$DIE_AREA 0] + 1}] [expr {[lindex \$DIE_AREA 1] + 1}] [expr {[lindex \$DIE_AREA 2] - 1}] [expr {[lindex \$DIE_AREA 3] - 1}]" \\',
+      '        -core_area "[expr {[lindex \$DIE_AREA 0] + \$_core_inset}] [expr {[lindex \$DIE_AREA 1] + \$_core_inset}] [expr {[lindex \$DIE_AREA 2] - \$_core_inset}] [expr {[lindex \$DIE_AREA 3] - \$_core_inset}]" \\',
     );
     buf.writeln('        -site \$SITE_NAME');
     buf.writeln('} else {');
@@ -226,6 +263,148 @@ class OpenroadTclEmitter {
     buf.writeln();
   }
 
+  /// Place I/O pads around the die perimeter and instantiate corner cells.
+  ///
+  /// The chip wrapper Verilog already contains the signal-bearing pad
+  /// instances. Their physical placement is computed here: pads are
+  /// distributed evenly across the four die sides, walking clockwise
+  /// starting at the south-west corner. Corner cells are physical-only
+  /// instances inserted via odb so they don't need to live in the netlist.
+  void _writePadring(StringBuffer buf) {
+    buf.writeln(_section('Padring placement'));
+
+    buf.writeln('if {![info exists PAD_HEIGHT]} {');
+    buf.writeln('    puts "Skipping padring (PAD_HEIGHT not set)"');
+    buf.writeln('} else {');
+    buf.writeln('    set die_rect [[ord::get_db_block] getDieArea]');
+    buf.writeln('    set die_w [ord::dbu_to_microns [\$die_rect xMax]]');
+    buf.writeln('    set die_h [ord::dbu_to_microns [\$die_rect yMax]]');
+    buf.writeln('    set pad_h \$PAD_HEIGHT');
+    buf.writeln('    set corner \$CORNER_SIZE');
+    buf.writeln();
+
+    // Collect every instance whose master is a PAD-class cell. Bidir,
+    // input, output, and power pads all have CLASS PAD in the LEF; the
+    // db reports their type as PAD or PAD_INPUT/PAD_OUTPUT/PAD_POWER.
+    buf.writeln('    set pads {}');
+    buf.writeln('    foreach inst [[ord::get_db_block] getInsts] {');
+    buf.writeln('        set m [\$inst getMaster]');
+    buf.writeln('        set t [\$m getType]');
+    buf.writeln('        if {[string match "PAD*" \$t]} {');
+    buf.writeln('            lappend pads \$inst');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('    set npads [llength \$pads]');
+    buf.writeln('    puts "Found \$npads pad instances to place"');
+    buf.writeln();
+
+    // Distribute round-robin across the 4 sides so power and signal
+    // pads end up evenly spread (the wrapper interleaves them in
+    // declaration order: bidir IO, then per-port pads, then power pads).
+    buf.writeln('    set per_side [expr {(\$npads + 3) / 4}]');
+    buf.writeln(
+      '    set pad_pitch_x [expr {(\$die_w - 2 * \$corner) / \$per_side}]',
+    );
+    buf.writeln(
+      '    set pad_pitch_y [expr {(\$die_h - 2 * \$corner) / \$per_side}]',
+    );
+    buf.writeln();
+
+    buf.writeln('    set mfg 0.005');
+    buf.writeln('    proc snap_um {v mfg} {');
+    buf.writeln('        return [expr {int(\$v / \$mfg) * \$mfg}]');
+    buf.writeln('    }');
+    buf.writeln();
+
+    buf.writeln('    for {set i 0} {\$i < \$npads} {incr i} {');
+    buf.writeln('        set inst [lindex \$pads \$i]');
+    buf.writeln('        set side [expr {\$i / \$per_side}]');
+    buf.writeln('        if {\$side > 3} { set side 3 }');
+    buf.writeln('        set idx [expr {\$i % \$per_side}]');
+    buf.writeln('        if {\$side == 0} {');
+    buf.writeln('            # South (bottom). Pad in default orientation R0,');
+    buf.writeln('            # bond pad faces -Y (towards die edge).');
+    buf.writeln(
+      '            set x [snap_um [expr {\$corner + \$idx * \$pad_pitch_x}] \$mfg]',
+    );
+    buf.writeln('            set y 0');
+    buf.writeln('            set ori R0');
+    buf.writeln('        } elseif {\$side == 1} {');
+    buf.writeln('            # East (right). Pad rotated R270 (clockwise 90).');
+    buf.writeln('            set x [snap_um [expr {\$die_w - \$pad_h}] \$mfg]');
+    buf.writeln(
+      '            set y [snap_um [expr {\$corner + \$idx * \$pad_pitch_y}] \$mfg]',
+    );
+    buf.writeln('            set ori R270');
+    buf.writeln('        } elseif {\$side == 2} {');
+    buf.writeln('            # North (top). Pad rotated R180.');
+    buf.writeln(
+      '            set x [snap_um [expr {\$die_w - \$corner - (\$idx + 1) * \$pad_pitch_x}] \$mfg]',
+    );
+    buf.writeln('            set y [snap_um [expr {\$die_h - \$pad_h}] \$mfg]');
+    buf.writeln('            set ori R180');
+    buf.writeln('        } else {');
+    buf.writeln('            # West (left). Pad rotated R90.');
+    buf.writeln('            set x 0');
+    buf.writeln(
+      '            set y [snap_um [expr {\$die_h - \$corner - (\$idx + 1) * \$pad_pitch_y}] \$mfg]',
+    );
+    buf.writeln('            set ori R90');
+    buf.writeln('        }');
+    buf.writeln(
+      '        \$inst setLocation [ord::microns_to_dbu \$x] [ord::microns_to_dbu \$y]',
+    );
+    buf.writeln('        \$inst setLocationOrient \$ori');
+    buf.writeln('        \$inst setPlacementStatus FIRM');
+    buf.writeln('    }');
+    buf.writeln(
+      '    puts "Placed \$npads pads (\$per_side per side, pitch x=\$pad_pitch_x y=\$pad_pitch_y)"',
+    );
+    buf.writeln();
+
+    // Corner cells. These are physical-only instances created via odb so
+    // they don't need to appear in the wrapper netlist.
+    buf.writeln(
+      '    set corner_master [[ord::get_db] findMaster \$PAD_CORNER]',
+    );
+    buf.writeln('    if {\$corner_master ne "NULL"} {');
+    buf.writeln('        set block [ord::get_db_block]');
+    buf.writeln(
+      '        proc place_corner {block master name x_um y_um ori} {',
+    );
+    buf.writeln(
+      '            set inst [odb::dbInst_create \$block \$master \$name]',
+    );
+    buf.writeln(
+      '            \$inst setLocation [ord::microns_to_dbu \$x_um] '
+      '[ord::microns_to_dbu \$y_um]',
+    );
+    buf.writeln('            \$inst setLocationOrient \$ori');
+    buf.writeln('            \$inst setPlacementStatus FIRM');
+    buf.writeln('        }');
+    buf.writeln(
+      '        place_corner \$block \$corner_master "corner_bl" 0 0 R0',
+    );
+    buf.writeln(
+      '        place_corner \$block \$corner_master "corner_br" '
+      '[expr {\$die_w - \$corner}] 0 R270',
+    );
+    buf.writeln(
+      '        place_corner \$block \$corner_master "corner_tr" '
+      '[expr {\$die_w - \$corner}] [expr {\$die_h - \$corner}] R180',
+    );
+    buf.writeln(
+      '        place_corner \$block \$corner_master "corner_tl" '
+      '0 [expr {\$die_h - \$corner}] R90',
+    );
+    buf.writeln('        puts "Placed 4 corner cells"');
+    buf.writeln('    } else {');
+    buf.writeln('        puts "WARNING: corner cell \$PAD_CORNER not loaded"');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln();
+  }
+
   void _writePinPlacement(StringBuffer buf) {
     buf.writeln(_section('Pin placement'));
 
@@ -253,8 +432,21 @@ class OpenroadTclEmitter {
       eastPins.addAll(['clkOut\\[*\\]', 'clkLocked\\[*\\]']);
     }
 
+    // place_pins assigns physical locations to top-level ports. The
+    // chip-level wrapper has only VDD/VSS as ports (bond pads are the
+    // signal boundary), and those are power nets that OpenROAD's
+    // global_connect handles separately, so place_pins isn't needed
+    // when PAD_HEIGHT is set.
+    buf.writeln('if {![info exists PAD_HEIGHT]} {');
     _writeLayerDetection(buf);
-    buf.writeln('place_pins -hor_layers \$hor_layer -ver_layers \$ver_layer');
+    buf.writeln(
+      '    place_pins -hor_layers \$hor_layer -ver_layers \$ver_layer',
+    );
+    buf.writeln('} else {');
+    buf.writeln(
+      '    puts "Skipping place_pins (chip wrapper has no signal ports)"',
+    );
+    buf.writeln('}');
     buf.writeln();
   }
 
@@ -264,6 +456,62 @@ class OpenroadTclEmitter {
     buf.writeln('add_global_connection -net VDD -pin_pattern VDD -power');
     buf.writeln('add_global_connection -net VSS -pin_pattern VSS -ground');
     buf.writeln('global_connect');
+    buf.writeln();
+  }
+
+  /// Generate PDN after macros are placed and fixed.
+  void _writePdnGen(StringBuffer buf) {
+    buf.writeln(_section('Power delivery network'));
+
+    buf.writeln('if {[info exists PDN_RAIL_LAYER]} {');
+    buf.writeln('    set_voltage_domain -name CORE -power VDD -ground VSS');
+    buf.writeln();
+    buf.writeln(
+      '    # Standard cell grid: M1 followpins + M4 vertical + M5 horizontal',
+    );
+    buf.writeln('    define_pdn_grid -name stdcell_grid \\');
+    buf.writeln('        -starts_with POWER -voltage_domain CORE');
+    buf.writeln();
+    buf.writeln('    add_pdn_stripe -grid stdcell_grid \\');
+    buf.writeln(
+      '        -layer \$PDN_RAIL_LAYER -width \$PDN_RAIL_WIDTH -followpins',
+    );
+    buf.writeln();
+    buf.writeln('    add_pdn_stripe -grid stdcell_grid \\');
+    buf.writeln('        -layer \$PDN_VERTICAL_LAYER -width \$PDN_VWIDTH \\');
+    buf.writeln('        -pitch \$PDN_VPITCH -offset \$PDN_VOFFSET \\');
+    buf.writeln('        -spacing \$PDN_VSPACING -starts_with POWER');
+    buf.writeln();
+    buf.writeln('    add_pdn_stripe -grid stdcell_grid \\');
+    buf.writeln('        -layer \$PDN_HORIZONTAL_LAYER -width \$PDN_HWIDTH \\');
+    buf.writeln('        -pitch \$PDN_HPITCH -offset \$PDN_HOFFSET \\');
+    buf.writeln('        -spacing \$PDN_HSPACING -starts_with POWER');
+    buf.writeln();
+    buf.writeln('    # Stitch the three strap layers together');
+    buf.writeln('    add_pdn_connect -grid stdcell_grid \\');
+    buf.writeln('        -layers "\$PDN_RAIL_LAYER \$PDN_VERTICAL_LAYER"');
+    buf.writeln('    add_pdn_connect -grid stdcell_grid \\');
+    buf.writeln(
+      '        -layers "\$PDN_VERTICAL_LAYER \$PDN_HORIZONTAL_LAYER"',
+    );
+    buf.writeln();
+    buf.writeln('    # Macro grid: bind to each tile macro\'s exposed M1');
+    buf.writeln('    # power pins. -grid_over_pg_pins tells pdngen to use');
+    buf.writeln('    # the macro\'s existing PG pin locations as via drops,');
+    buf.writeln('    # so the M4/M5 straps that pass over the macro can land');
+    buf.writeln('    # vias to power the cells inside.');
+    buf.writeln('    define_pdn_grid -name macro_grid -macro -default \\');
+    buf.writeln('        -starts_with POWER -voltage_domain CORE \\');
+    buf.writeln('        -grid_over_pg_pins');
+    buf.writeln('    add_pdn_connect -grid macro_grid \\');
+    buf.writeln('        -layers "\$PDN_RAIL_LAYER \$PDN_VERTICAL_LAYER"');
+    buf.writeln('    add_pdn_connect -grid macro_grid \\');
+    buf.writeln(
+      '        -layers "\$PDN_VERTICAL_LAYER \$PDN_HORIZONTAL_LAYER"',
+    );
+    buf.writeln();
+    buf.writeln('    pdngen');
+    buf.writeln('}');
     buf.writeln();
   }
 
@@ -311,10 +559,31 @@ class OpenroadTclEmitter {
     buf.writeln('    }');
     buf.writeln();
 
-    // Get die dimensions
-    buf.writeln('    set die_rect [[ord::get_db_block] getDieArea]');
-    buf.writeln('    set die_w [ord::dbu_to_microns [\$die_rect xMax]]');
-    buf.writeln('    set die_h [ord::dbu_to_microns [\$die_rect yMax]]');
+    // Use the *core* area for placement: with chip-level integration
+    // the padring occupies a PAD_HEIGHT strip between core and die, so
+    // tile macros must be shifted inwards by the core origin and sized
+    // against the core dimensions.
+    buf.writeln('    set core_rect [[ord::get_db_block] getCoreArea]');
+    buf.writeln('    set core_xmin [ord::dbu_to_microns [\$core_rect xMin]]');
+    buf.writeln('    set core_ymin [ord::dbu_to_microns [\$core_rect yMin]]');
+    buf.writeln('    set core_xmax [ord::dbu_to_microns [\$core_rect xMax]]');
+    buf.writeln('    set core_ymax [ord::dbu_to_microns [\$core_rect yMax]]');
+    buf.writeln('    set die_w [expr {\$core_xmax - \$core_xmin}]');
+    buf.writeln('    set die_h [expr {\$core_ymax - \$core_ymin}]');
+    buf.writeln();
+    // place_inst translates a core-relative (x_um, y_um) location to the
+    // absolute die coordinate that OpenROAD wants. Using this helper
+    // means the rest of the placement logic can keep speaking in
+    // core-relative terms even when the core has been inset.
+    buf.writeln('    proc place_inst {inst x_um y_um} {');
+    buf.writeln('        upvar core_xmin xoff core_ymin yoff');
+    buf.writeln(
+      '        \$inst setLocation '
+      '[ord::microns_to_dbu [expr {\$x_um + \$xoff}]] '
+      '[ord::microns_to_dbu [expr {\$y_um + \$yoff}]]',
+    );
+    buf.writeln('        \$inst setPlacementStatus FIRM');
+    buf.writeln('    }');
     buf.writeln();
 
     // Place fabric tiles (Tile, BramTile, DspBasicTile) in main grid
@@ -435,10 +704,7 @@ class OpenroadTclEmitter {
     buf.writeln('                    if {[llength \$tile_q] > 0} {');
     buf.writeln('                        set inst [lindex \$tile_q 0]');
     buf.writeln('                        set tile_q [lrange \$tile_q 1 end]');
-    buf.writeln(
-      '                        \$inst setLocation [ord::microns_to_dbu \$cx] [ord::microns_to_dbu \$cy]',
-    );
-    buf.writeln('                        \$inst setPlacementStatus FIRM');
+    buf.writeln('                        place_inst \$inst \$cx \$cy');
     buf.writeln('                        incr placed');
     buf.writeln('                    }');
     buf.writeln('                }');
@@ -446,10 +712,7 @@ class OpenroadTclEmitter {
     buf.writeln('                    if {[llength \$bram_q] > 0} {');
     buf.writeln('                        set inst [lindex \$bram_q 0]');
     buf.writeln('                        set bram_q [lrange \$bram_q 1 end]');
-    buf.writeln(
-      '                        \$inst setLocation [ord::microns_to_dbu \$cx] [ord::microns_to_dbu \$cy]',
-    );
-    buf.writeln('                        \$inst setPlacementStatus FIRM');
+    buf.writeln('                        place_inst \$inst \$cx \$cy');
     buf.writeln('                        incr placed');
     buf.writeln('                    }');
     buf.writeln('                }');
@@ -457,10 +720,7 @@ class OpenroadTclEmitter {
     buf.writeln('                    if {[llength \$dsp_q] > 0} {');
     buf.writeln('                        set inst [lindex \$dsp_q 0]');
     buf.writeln('                        set dsp_q [lrange \$dsp_q 1 end]');
-    buf.writeln(
-      '                        \$inst setLocation [ord::microns_to_dbu \$cx] [ord::microns_to_dbu \$cy]',
-    );
-    buf.writeln('                        \$inst setPlacementStatus FIRM');
+    buf.writeln('                        place_inst \$inst \$cx \$cy');
     buf.writeln('                        incr placed');
     buf.writeln('                    }');
     buf.writeln('                }');
@@ -495,10 +755,8 @@ class OpenroadTclEmitter {
     );
     buf.writeln('            set io_x [expr {\$margin + \$i * \$tile_px}]');
     buf.writeln(
-      '            [lindex \$macro_groups(IOTile) \$io_idx] setLocation [ord::microns_to_dbu \$io_x] [ord::microns_to_dbu \$io_y]',
-    );
-    buf.writeln(
-      '            [lindex \$macro_groups(IOTile) \$io_idx] setPlacementStatus FIRM',
+      '            place_inst [lindex \$macro_groups(IOTile) \$io_idx] '
+      '\$io_x \$io_y',
     );
     buf.writeln('            incr io_idx');
     buf.writeln('        }');
@@ -509,10 +767,8 @@ class OpenroadTclEmitter {
     );
     buf.writeln('            set io_x [expr {\$margin + \$i * \$tile_px}]');
     buf.writeln(
-      '            [lindex \$macro_groups(IOTile) \$io_idx] setLocation [ord::microns_to_dbu \$io_x] [ord::microns_to_dbu \$io_y]',
-    );
-    buf.writeln(
-      '            [lindex \$macro_groups(IOTile) \$io_idx] setPlacementStatus FIRM',
+      '            place_inst [lindex \$macro_groups(IOTile) \$io_idx] '
+      '\$io_x \$io_y',
     );
     buf.writeln('            incr io_idx');
     buf.writeln('        }');
@@ -526,10 +782,8 @@ class OpenroadTclEmitter {
       '            set io_y [expr {\$margin + \$io_row * (\$io_h + \$halo)}]',
     );
     buf.writeln(
-      '            [lindex \$macro_groups(IOTile) \$io_idx] setLocation [ord::microns_to_dbu \$io_x] [ord::microns_to_dbu \$io_y]',
-    );
-    buf.writeln(
-      '            [lindex \$macro_groups(IOTile) \$io_idx] setPlacementStatus FIRM',
+      '            place_inst [lindex \$macro_groups(IOTile) \$io_idx] '
+      '\$io_x \$io_y',
     );
     buf.writeln('            incr io_idx');
     buf.writeln('            incr io_row');
@@ -551,10 +805,7 @@ class OpenroadTclEmitter {
     buf.writeln(
       '            set mh [ord::dbu_to_microns [[\$inst getMaster] getHeight]]',
     );
-    buf.writeln(
-      '            \$inst setLocation [ord::microns_to_dbu \$serdes_x] [ord::microns_to_dbu \$serdes_y]',
-    );
-    buf.writeln('            \$inst setPlacementStatus FIRM');
+    buf.writeln('            place_inst \$inst \$serdes_x \$serdes_y');
     buf.writeln(
       '            puts "Placed SerDesTile at \${serdes_x}um x \${serdes_y}um"',
     );
@@ -577,10 +828,7 @@ class OpenroadTclEmitter {
       '                set mh [ord::dbu_to_microns [[\$inst getMaster] getHeight]]',
     );
     buf.writeln('                set x [expr {\$edge_x - \$mw}]');
-    buf.writeln(
-      '                \$inst setLocation [ord::microns_to_dbu \$x] [ord::microns_to_dbu \$edge_y]',
-    );
-    buf.writeln('                \$inst setPlacementStatus FIRM');
+    buf.writeln('                place_inst \$inst \$x \$edge_y');
     buf.writeln('                set edge_y [expr {\$edge_y + \$mh + \$halo}]');
     buf.writeln(
       '                puts "Placed \$type at \${x}um x [expr {\$edge_y - \$mh - \$halo}]um"',
@@ -619,41 +867,89 @@ class OpenroadTclEmitter {
     buf.writeln();
     buf.writeln('detailed_placement');
     buf.writeln();
+
+    // Filler cell insertion: fillcap first (decoupling capacitance),
+    // then plain fill for the smaller leftover gaps. Largest first so
+    // big gaps consume one big cell.
+    buf.writeln('set fillers {}');
+    buf.writeln('foreach sz {64 32 16 8 4} {');
+    buf.writeln('    lappend fillers \${CELL_LIB}__fillcap_\$sz');
+    buf.writeln('}');
+    buf.writeln('foreach sz {64 32 16 8 4 2 1} {');
+    buf.writeln('    lappend fillers \${CELL_LIB}__fill_\$sz');
+    buf.writeln('}');
+    buf.writeln('filler_placement \$fillers');
+    buf.writeln();
   }
 
   void _writeRouting(StringBuffer buf) {
     buf.writeln(_section('Routing'));
 
-    // Use upper metal layers for top-level routing
-    // Metal1-Metal2 may be used internally by tile macros
-    // Auto-detect the highest available routing layer
-    buf.writeln('set top_route ""');
-    buf.writeln('foreach layer [lreverse [get_routing_layers]] {');
+    // Top-level signals route on Metal2 through Metal4. The chip-level
+    // pad cells expose their internal A/Y/OE pins on Metal2 - that is
+    // where signals enter and leave the pad. The Metal5 PAD pin is the
+    // physical bond-wire attachment point and intentionally has no
+    // internal access (it's reached by the bond wire externally), so
+    // capping signal routing at Metal4 keeps detailed_route from
+    // failing pin-access checks on those PAD pins.
+    buf.writeln('set_routing_layers -signal Metal2-Metal4');
+    buf.writeln('# Apply per-layer routing capacity adjustments');
+    buf.writeln('if {[array exists LAYER_ADJ]} {');
+    buf.writeln('    foreach layer [array names LAYER_ADJ] {');
     buf.writeln(
-      '    if {![catch {set tl '
-      '[[[ord::get_db] getTech] findLayer \$layer]}]} {',
+      '        set_global_routing_layer_adjustment \$layer \$LAYER_ADJ(\$layer)',
     );
-    buf.writeln('        if {\$tl ne "NULL" && \$top_route eq ""} {');
-    buf.writeln('            set top_route \$layer');
-    buf.writeln('        }');
     buf.writeln('    }');
     buf.writeln('}');
-    buf.writeln('if {\$top_route eq ""} { set top_route Metal2 }');
-    buf.writeln('puts "Routing layers: Metal1-\$top_route"');
-    buf.writeln('set_routing_layers -signal Metal1-\$top_route');
-    buf.writeln('global_route -allow_congestion');
+    // -congestion_iterations 0 skips the rip-up-and-reroute pass that
+    // calls parasitic estimation (which is segfaulting in
+    // MakeWireParasitics::layerRC for this chip-level design). The
+    // initial route still runs; detailed_route handles the cleanup.
+    buf.writeln('global_route -allow_congestion -congestion_iterations 0');
     buf.writeln();
     buf.writeln('# Save global-routed DEF (guaranteed output)');
     buf.writeln('write_def \${DEVICE_NAME}_grouted.def');
     buf.writeln();
     buf.writeln(
-      '# Detailed route may fail on offgrid pin shapes from place_pins.',
+      'if {![info exists DROUTE_END_ITER]} { set DROUTE_END_ITER 32 }',
     );
-    buf.writeln('# If it fails, we still have the global-routed DEF.');
+    // -top_routing_layer caps detailed_route at Metal4 so it never
+    // looks at Metal5 (where the bond-pad PAD pins live, and where
+    // we deliberately do not have internal access). Without this
+    // restriction the router fails with DRT-0073 on PAD pins.
     buf.writeln(
-      'if {![info exists DROUTE_END_ITER]} { set DROUTE_END_ITER 8 }',
+      'detailed_route -droute_end_iter \$DROUTE_END_ITER '
+      '-or_seed 42 -or_k 3 '
+      '-bottom_routing_layer Metal2 -top_routing_layer Metal4 '
+      '-output_drc \${DEVICE_NAME}_drc.rpt',
     );
-    buf.writeln('detailed_route -droute_end_iter \$DROUTE_END_ITER');
+    buf.writeln();
+
+    // Antenna check + repair via layer-bumping only. We reclassify any
+    // ANTENNACELL master to plain CORE so repair_antennas cannot insert
+    // diode cells (the gf180mcu __antenna cell has class ANTENNACELL but
+    // we don't want it instantiated).
+    buf.writeln('foreach lib [[ord::get_db] getLibs] {');
+    buf.writeln('    foreach mast [\$lib getMasters] {');
+    buf.writeln('        if {[\$mast getType] eq "CORE_ANTENNACELL"} {');
+    buf.writeln('            \$mast setType "CORE"');
+    buf.writeln('        }');
+    buf.writeln('    }');
+    buf.writeln('}');
+    buf.writeln('check_antennas -report_file antenna_pre.rpt');
+    // repair_antennas does its own incremental routing for layer-bumping;
+    // a follow-up detailed_route would conflict with M4 pin access on the
+    // tile macros (DRT-1231) so we trust repair_antennas to leave the
+    // design routed.
+    buf.writeln('repair_antennas');
+    buf.writeln('check_antennas -report_file antenna.rpt');
+    buf.writeln();
+  }
+
+  void _writeDensityFill(StringBuffer buf) {
+    buf.writeln(_section('Density fill'));
+
+    buf.writeln(r'density_fill -rules $FILL_CONFIG');
     buf.writeln();
   }
 
@@ -675,8 +971,13 @@ class OpenroadTclEmitter {
   }
 
   void _writeLayerDetection(StringBuffer buf) {
+    // Push top-level pins up to Metal3 (hor) / Metal4 (ver). Tile macros
+    // also expose pins on these layers, so inter-tile routing stays on
+    // higher layers and avoids saturating M2/M3.
     buf.writeln('set hor_layer ""');
     buf.writeln('set ver_layer ""');
+    buf.writeln('set skip_first_hor 1');
+    buf.writeln('set skip_first_ver 1');
     buf.writeln('foreach layer [get_routing_layers] {');
     buf.writeln(
       '    if {![catch {set tl '
@@ -684,19 +985,26 @@ class OpenroadTclEmitter {
     );
     buf.writeln('        if {\$tl ne "NULL"} {');
     buf.writeln('            set dir [\$tl getDirection]');
+    buf.writeln('            if {\$dir eq "HORIZONTAL" && \$skip_first_hor} {');
+    buf.writeln('                set skip_first_hor 0');
     buf.writeln(
-      '            if {\$dir eq "HORIZONTAL" && \$hor_layer eq ""} {',
+      '            } elseif {\$dir eq "HORIZONTAL" && \$hor_layer eq ""} {',
     );
     buf.writeln('                set hor_layer \$layer');
     buf.writeln('            }');
-    buf.writeln('            if {\$dir eq "VERTICAL" && \$ver_layer eq ""} {');
+    buf.writeln('            if {\$dir eq "VERTICAL" && \$skip_first_ver} {');
+    buf.writeln('                set skip_first_ver 0');
+    buf.writeln(
+      '            } elseif {\$dir eq "VERTICAL" && \$ver_layer eq ""} {',
+    );
     buf.writeln('                set ver_layer \$layer');
     buf.writeln('            }');
     buf.writeln('        }');
     buf.writeln('    }');
     buf.writeln('}');
-    buf.writeln('if {\$hor_layer eq ""} { set hor_layer Metal1 }');
-    buf.writeln('if {\$ver_layer eq ""} { set ver_layer Metal2 }');
+    buf.writeln('if {\$hor_layer eq ""} { set hor_layer Metal3 }');
+    buf.writeln('if {\$ver_layer eq ""} { set ver_layer Metal4 }');
+    buf.writeln('puts "Pin layers: hor=\$hor_layer ver=\$ver_layer"');
   }
 
   String _section(String title) =>
